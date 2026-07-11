@@ -1,7 +1,8 @@
 name: Release (Layerbase fork)
 
 # Tag-triggered release for the Layerbase-LLC fork. Pushing a tag of the form
-# vX.Y.Z-layerbase builds a linux/amd64 (glibc) binary and publishes
+# vX.Y.Z-layerbase (optionally with a fork revision suffix such as
+# vX.Y.Z-layerbase-2) builds a linux/amd64 (glibc) binary and publishes
 # pgsqlite-linux-amd64.tar.gz as a GitHub release asset. The layerbase-cloud
 # universal image (images/Dockerfile.base) downloads and untars exactly that
 # asset name. This workflow is separate from the upstream release.yml so a
@@ -10,7 +11,10 @@ name: Release (Layerbase fork)
 on:
   push:
     tags:
-      - 'v*-layerbase'
+      # Trailing * so both v*-layerbase and suffixed revisions like
+      # v*-layerbase-2 match (a bare v*-layerbase glob requires the ref to end
+      # in -layerbase and would miss the suffixed forms).
+      - 'v*-layerbase*'
   workflow_dispatch:
 
 env:
