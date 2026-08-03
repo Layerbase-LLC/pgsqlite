@@ -53,7 +53,10 @@ static TABLE_SCHEMA_CACHE: Lazy<RwLock<HashMap<String, TableSchemaInfo>>> =
 
 /// Regex pattern for DROP TABLE statements
 static DROP_TABLE_REGEX: Lazy<Result<Regex, regex::Error>> = Lazy::new(|| {
-    Regex::new(r"(?i)DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?([a-zA-Z_][a-zA-Z0-9_]*)")
+    // Accepts quoted identifiers too - every identifier-quoting ORM emits
+    // `DROP TABLE "users"`, which the bare-word-only pattern silently skipped,
+    // leaving the table's enum-usage records and schema cache entry behind.
+    Regex::new(r#"(?i)DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?("(?:[^"]|"")*"|[a-zA-Z_][a-zA-Z0-9_]*)"#)
 });
 
 /// Invalidate cached schema information for a table
@@ -1961,7 +1964,7 @@ impl QueryExecutor {
                 .ok()
                 .and_then(|regex| regex.captures(query))
                 .and_then(|caps| caps.get(1))
-                .map(|m| m.as_str().to_string())
+                .map(|m| crate::utils::normalize_identifier(m.as_str()))
         } else {
             None
         };
@@ -2009,8 +2012,13 @@ impl QueryExecutor {
                 // Store each type mapping
                 for (full_column, type_mapping) in &type_mappings {
                     // Split table.column format
-                    let parts: Vec<&str> = full_column.split('.').collect();
-                    if parts.len() == 2 && parts[0] == table_name {
+                    let raw_parts: Vec<&str> = full_column.split('.').collect();
+                    if raw_parts.len() == 2 && raw_parts[0] == table_name {
+                        // Never persist a quoted identifier: SQLite stores the
+                        // unquoted name and the startup drift check compares the two
+                        // as raw strings, so `"created_at"` would read as drift.
+                        let normalized_column = crate::utils::normalize_identifier(raw_parts[1]);
+                        let parts = [raw_parts[0], normalized_column.as_str()];
                         let insert_query = format!(
                             "INSERT OR REPLACE INTO __pgsqlite_schema (table_name, column_name, pg_type, sqlite_type) VALUES ('{}', '{}', '{}', '{}')",
                             table_name, parts[1], type_mapping.pg_type, type_mapping.sqlite_type
@@ -2698,9 +2706,11 @@ pub fn extract_table_name_from_create(query: &str) -> Option<String> {
     }).unwrap_or(after_create.len());
     
     let table_name = after_create[..table_end].trim();
-    
-    // Remove quotes if present
-    let table_name = table_name.trim_matches('"').trim_matches('\'');
+
+    // Remove quotes if present. Quoted identifiers must be normalized before
+    // they reach the __pgsqlite_* metadata tables, which store unquoted names.
+    let table_name = crate::utils::normalize_identifier(table_name.trim_matches('\''));
+    let table_name = table_name.as_str();
     
     if !table_name.is_empty() {
         Some(table_name.to_string())

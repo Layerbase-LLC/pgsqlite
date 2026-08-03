@@ -378,6 +378,18 @@ impl DbHandler {
         ).unwrap_or(0) > 0;
         
         if schema_table_exists {
+            // Self-heal first: builds up to v0.0.22-layerbase-6 persisted quoted
+            // identifiers (`"created_at"`) into the __pgsqlite_* metadata tables
+            // whenever the client quoted its DDL. SQLite reports the unquoted
+            // name, so the drift check below would flag every column of every
+            // table and refuse to open the database. This repair is idempotent
+            // and only touches rows that are actually quoted.
+            if let Err(e) = crate::migration::repair_quoted_identifiers(&conn) {
+                // Never block startup on the repair itself; the drift check
+                // still runs and reports whatever it finds.
+                tracing::warn!("Failed to repair quoted identifiers in pgsqlite metadata: {e}");
+            }
+
             // Database has pgsqlite schema - check for drift
             use crate::schema_drift::SchemaDriftDetector;
             match SchemaDriftDetector::detect_drift(&conn) {
@@ -1825,6 +1837,12 @@ impl DbHandler {
 
             let rows_affected = conn.execute(&processed_query, [])?;
 
+            // Keep __pgsqlite_* metadata in step with post-CREATE DDL
+            // (ALTER TABLE ADD/DROP/RENAME, DROP TABLE). Without this the
+            // metadata and SQLite diverge and the next startup drift check
+            // refuses to open the database.
+            crate::ddl::maintain_metadata_after_ddl(&conn, query);
+
             // Handle CREATE TABLE metadata storage and constraints
             if query.trim_start().to_uppercase().starts_with("CREATE TABLE")
                 && let Some(table_name) = extract_table_name_from_create(query) {
@@ -1861,8 +1879,13 @@ impl DbHandler {
                     // Store each type mapping
                     for (full_column, type_mapping) in &type_mappings {
                         // Split table.column format
-                        let parts: Vec<&str> = full_column.split('.').collect();
-                        if parts.len() == 2 && parts[0] == table_name {
+                        let raw_parts: Vec<&str> = full_column.split('.').collect();
+                        if raw_parts.len() == 2 && raw_parts[0] == table_name {
+                            // Never persist a quoted identifier: SQLite stores the
+                            // unquoted name and the startup drift check compares the two
+                            // as raw strings, so `"created_at"` would read as drift.
+                            let normalized_column = crate::utils::normalize_identifier(raw_parts[1]);
+                            let parts = [raw_parts[0], normalized_column.as_str()];
                             let insert_query = format!(
                                 "INSERT OR REPLACE INTO __pgsqlite_schema (table_name, column_name, pg_type, sqlite_type) VALUES ('{}', '{}', '{}', '{}')",
                                 table_name, parts[1], type_mapping.pg_type, type_mapping.sqlite_type
@@ -1946,6 +1969,12 @@ impl DbHandler {
                     let processed_query = process_query(query, conn, &self.schema_cache)?;
 
                     let rows_affected = conn.execute(&processed_query, [])?;
+
+                    // Keep __pgsqlite_* metadata in step with post-CREATE DDL
+                    // (ALTER TABLE ADD/DROP/RENAME, DROP TABLE). Without this the
+                    // metadata and SQLite diverge and the next startup drift check
+                    // refuses to open the database.
+                    crate::ddl::maintain_metadata_after_ddl(conn, query);
 
                     // Handle CREATE TABLE metadata storage
                     if query.trim_start().to_uppercase().starts_with("CREATE TABLE")
@@ -2038,6 +2067,12 @@ impl DbHandler {
 
             let rows_affected = conn.execute(&processed_query, [])?;
 
+            // Keep __pgsqlite_* metadata in step with post-CREATE DDL
+            // (ALTER TABLE ADD/DROP/RENAME, DROP TABLE). Without this the
+            // metadata and SQLite diverge and the next startup drift check
+            // refuses to open the database.
+            crate::ddl::maintain_metadata_after_ddl(conn, query);
+
             // Handle CREATE TABLE metadata storage and constraints
             if query.trim_start().to_uppercase().starts_with("CREATE TABLE")
                 && let Some(table_name) = extract_table_name_from_create(query) {
@@ -2074,8 +2109,13 @@ impl DbHandler {
                     // Store each type mapping
                     for (full_column, type_mapping) in &type_mappings {
                         // Split table.column format
-                        let parts: Vec<&str> = full_column.split('.').collect();
-                        if parts.len() == 2 && parts[0] == table_name {
+                        let raw_parts: Vec<&str> = full_column.split('.').collect();
+                        if raw_parts.len() == 2 && raw_parts[0] == table_name {
+                            // Never persist a quoted identifier: SQLite stores the
+                            // unquoted name and the startup drift check compares the two
+                            // as raw strings, so `"created_at"` would read as drift.
+                            let normalized_column = crate::utils::normalize_identifier(raw_parts[1]);
+                            let parts = [raw_parts[0], normalized_column.as_str()];
                             let insert_query = format!(
                                 "INSERT OR REPLACE INTO __pgsqlite_schema (table_name, column_name, pg_type, sqlite_type) VALUES ('{}', '{}', '{}', '{}')",
                                 table_name, parts[1], type_mapping.pg_type, type_mapping.sqlite_type
@@ -2780,8 +2820,13 @@ impl DbHandler {
         // Store each type mapping
         for (full_column, type_mapping) in type_mappings {
             // Split table.column format
-            let parts: Vec<&str> = full_column.split('.').collect();
-            if parts.len() == 2 && parts[0] == table_name {
+            let raw_parts: Vec<&str> = full_column.split('.').collect();
+            if raw_parts.len() == 2 && raw_parts[0] == table_name {
+                // Never persist a quoted identifier: SQLite stores the
+                // unquoted name and the startup drift check compares the two
+                // as raw strings, so `"created_at"` would read as drift.
+                let normalized_column = crate::utils::normalize_identifier(raw_parts[1]);
+                let parts = [raw_parts[0], normalized_column.as_str()];
                 let insert_query = format!(
                     "INSERT OR REPLACE INTO __pgsqlite_schema (table_name, column_name, pg_type, sqlite_type) VALUES ('{}', '{}', '{}', '{}')",
                     table_name, parts[1], type_mapping.pg_type, type_mapping.sqlite_type

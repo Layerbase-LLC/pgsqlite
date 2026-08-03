@@ -2,6 +2,8 @@ use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
+use crate::utils::{normalize_identifier, quote_identifier};
+
 #[derive(Debug, Error)]
 pub enum SchemaDriftError {
     #[error("Schema drift detected: {0}")]
@@ -104,10 +106,23 @@ impl SchemaDriftDetector {
         let mut stmt = conn.prepare(
             "SELECT DISTINCT table_name FROM __pgsqlite_schema ORDER BY table_name"
         )?;
-        
-        let tables = stmt.query_map([], |row| row.get::<_, String>(0))?
+
+        let raw = stmt.query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
-        
+
+        // Metadata written by older builds can carry the surrounding double
+        // quotes from the original DDL (`"themes"`). Normalize before doing
+        // anything with the name, and de-duplicate in case both spellings are
+        // present.
+        let mut tables = Vec::with_capacity(raw.len());
+        let mut seen = HashSet::new();
+        for name in raw {
+            let normalized = normalize_identifier(&name);
+            if seen.insert(normalized.clone()) {
+                tables.push(normalized);
+            }
+        }
+
         Ok(tables)
     }
     
@@ -167,33 +182,37 @@ impl SchemaDriftDetector {
     }
     
     fn get_metadata_columns(conn: &Connection, table_name: &str) -> Result<HashMap<String, ColumnInfo>, rusqlite::Error> {
+        // Match both the normalized name and the legacy quoted spelling that
+        // older builds persisted, so a database poisoned before the write-path
+        // fix still compares correctly instead of reporting every column of
+        // every table as drift (which hard-fails startup).
         let mut stmt = conn.prepare(
-            "SELECT column_name, pg_type, sqlite_type 
-             FROM __pgsqlite_schema 
-             WHERE table_name = ?1"
+            "SELECT column_name, pg_type, sqlite_type
+             FROM __pgsqlite_schema
+             WHERE table_name = ?1 OR table_name = ?2"
         )?;
-        
+
         let mut columns = HashMap::new();
-        let rows = stmt.query_map([table_name], |row| {
+        let rows = stmt.query_map([table_name, &quote_identifier(table_name)], |row| {
             Ok(ColumnInfo {
-                name: row.get(0)?,
+                name: normalize_identifier(&row.get::<_, String>(0)?),
                 pg_type: row.get(1)?,
                 sqlite_type: row.get(2)?,
                 nullable: true, // We don't track this in metadata yet
                 default_value: None, // We don't track this in metadata yet
             })
         })?;
-        
+
         for row in rows {
             let col = row?;
             columns.insert(col.name.clone(), col);
         }
-        
+
         Ok(columns)
     }
-    
+
     fn get_sqlite_columns(conn: &Connection, table_name: &str) -> Result<HashMap<String, ColumnInfo>, rusqlite::Error> {
-        let query = format!("PRAGMA table_info({table_name})");
+        let query = format!("PRAGMA table_info({})", quote_identifier(table_name));
         let mut stmt = conn.prepare(&query)?;
         
         let mut columns = HashMap::new();

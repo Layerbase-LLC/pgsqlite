@@ -2,6 +2,7 @@ use regex::Regex;
 use std::collections::HashMap;
 use crate::metadata::{TypeMapping, EnumMetadata};
 use crate::types::TypeMapper;
+use crate::utils::normalize_identifier;
 use crate::PgSqliteError;
 use rusqlite::Connection;
 use once_cell::sync::Lazy;
@@ -179,7 +180,9 @@ impl CreateTableTranslator {
         if parts.len() >= 2 {
             let pg_type = parts[1].to_uppercase();
             if pg_type == "SERIAL" || pg_type == "BIGSERIAL" {
-                return Some(parts[0].to_string());
+                // Normalize so a quoted `"id" SERIAL` still matches the
+                // `PRIMARY KEY (id)` constraint below.
+                return Some(normalize_identifier(parts[0]));
             }
         }
         None
@@ -193,9 +196,9 @@ impl CreateTableTranslator {
             if let Some(start) = column_def.find('(')
                 && let Some(end) = column_def.find(')') {
                     let column_list = &column_def[start + 1..end];
-                    let column_name = column_list.trim();
+                    let column_name = normalize_identifier(column_list);
                     // Check if this references a SERIAL column (case-insensitive)
-                    return serial_columns.iter().any(|serial_col| serial_col.eq_ignore_ascii_case(column_name));
+                    return serial_columns.iter().any(|serial_col| serial_col.eq_ignore_ascii_case(&column_name));
                 }
         }
         false
@@ -227,6 +230,15 @@ impl CreateTableTranslator {
         if parts.len() < 2 {
             return Ok(column_def.to_string());
         }
+
+        // The raw token may be quoted (`"created_at"`), which is what every
+        // identifier-quoting ORM emits. SQLite stores - and PRAGMA table_info
+        // reports - the unquoted name, so anything that ends up persisted in
+        // the __pgsqlite_* metadata tables must use the normalized spelling or
+        // the startup drift check will see the two sides disagree about every
+        // column. The emitted SQL below keeps the original token so the quoting
+        // still protects reserved words.
+        let metadata_column_name = normalize_identifier(column_name);
         
         // Extract the PostgreSQL type (handle multi-word types and parametric types)
         let mut pg_type = parts[1].to_uppercase();
@@ -307,7 +319,7 @@ impl CreateTableTranslator {
             
             // Store array column info for later metadata insertion
             context.array_columns.push((
-                column_name.to_string(),
+                metadata_column_name.clone(),
                 element_type.to_lowercase(),
                 dimensions
             ));
@@ -330,7 +342,7 @@ impl CreateTableTranslator {
                     
                     // Store enum column info for later trigger creation
                     context.enum_columns.push((
-                        column_name.to_string(),
+                        metadata_column_name.clone(),
                         pg_type.to_lowercase().to_string()
                     ));
                     
@@ -356,7 +368,7 @@ impl CreateTableTranslator {
         let type_modifier = Self::extract_type_modifier(&pg_type);
         
         // Store both PostgreSQL and SQLite types with modifier
-        let mapping_key = format!("{table_name}.{column_name}");
+        let mapping_key = format!("{table_name}.{metadata_column_name}");
         type_mapping.insert(mapping_key, TypeMapping {
             pg_type: normalized_pg_type,
             sqlite_type: sqlite_type.clone(),

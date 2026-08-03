@@ -1,5 +1,8 @@
+pub mod identifier_repair;
 pub mod registry;
 pub mod runner;
+
+pub use identifier_repair::repair_quoted_identifiers;
 
 use anyhow::Result;
 use rusqlite::Connection;
