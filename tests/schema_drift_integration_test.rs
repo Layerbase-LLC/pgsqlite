@@ -99,10 +99,15 @@ fn test_db_handler_fails_on_drift() {
         ).unwrap();
     }
     
-    // Now modify the schema directly to create drift
+    // Now modify the schema directly to create drift. This is the direction
+    // that is NOT self-healed: metadata claims a column SQLite does not have,
+    // which means something asserted a column that is not there. The opposite
+    // direction (a real column with no metadata row) is healed at startup - see
+    // test_db_handler_heals_columns_missing_from_metadata below and
+    // tests/metadata_backfill_test.rs.
     {
         let conn = Connection::open(&db_path).unwrap();
-        conn.execute("ALTER TABLE users ADD COLUMN phone TEXT", []).unwrap();
+        conn.execute("ALTER TABLE users DROP COLUMN email", []).unwrap();
     }
     
     // Try to open with DbHandler - should fail due to drift
@@ -113,10 +118,52 @@ fn test_db_handler_fails_on_drift() {
         let error_msg = e.to_string();
         eprintln!("Got error: {error_msg}");
         assert!(error_msg.contains("Schema drift detected"), "Expected 'Schema drift detected' in error: {error_msg}");
-        assert!(error_msg.contains("phone"));
+        assert!(error_msg.contains("email"));
     } else {
         panic!("Expected an error but got Ok");
     }
+}
+
+/// A column that exists in SQLite but has no metadata row is the one drift
+/// direction that is safe to heal: the table is intact, and a table with no
+/// metadata at all is already served by decltype inference, so refusing to open
+/// fails closed on a database that would have worked. Two shipped defects
+/// produced exactly this shape and bricked customer databases on wake.
+#[test]
+fn test_db_handler_heals_columns_missing_from_metadata() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("heal.db");
+
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        TypeMetadata::init(&conn).unwrap();
+        conn.execute(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO __pgsqlite_schema (table_name, column_name, pg_type, sqlite_type)
+             VALUES ('users', 'id', 'int4', 'INTEGER'), ('users', 'name', 'text', 'TEXT')",
+            [],
+        )
+        .unwrap();
+        // Added behind pgsqlite's back, exactly as a pre-layerbase-7 ALTER did.
+        conn.execute("ALTER TABLE users ADD COLUMN phone TEXT", []).unwrap();
+    }
+
+    DbHandler::new(db_path.to_str().unwrap())
+        .expect("a column missing only from metadata must be healed, not refused");
+
+    let conn = Connection::open(&db_path).unwrap();
+    let healed: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM __pgsqlite_schema WHERE table_name = 'users' AND column_name = 'phone'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(healed, 1, "the missing metadata row must have been written");
 }
 
 #[test]
