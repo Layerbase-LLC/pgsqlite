@@ -390,6 +390,21 @@ impl DbHandler {
                 tracing::warn!("Failed to repair quoted identifiers in pgsqlite metadata: {e}");
             }
 
+            // Then heal the one direction of drift that is safe to heal: a
+            // column that exists in SQLite but has no metadata row. The table
+            // itself is intact, and a table with no metadata at all is already
+            // served by decltype inference, so inferring the missing rows is
+            // strictly better than refusing to open the database. Two shipped
+            // defects produced this shape (ALTER ADD COLUMN before
+            // layerbase-7, CREATE TABLE columns named like constraints before
+            // layerbase-8) and each one bricked customer databases on wake.
+            //
+            // The opposite direction - metadata claiming a column SQLite does
+            // not have - is deliberately NOT healed and still hard-fails below.
+            if let Err(e) = crate::migration::backfill_missing_column_metadata(&conn) {
+                tracing::warn!("Failed to backfill missing pgsqlite column metadata: {e}");
+            }
+
             // Database has pgsqlite schema - check for drift
             use crate::schema_drift::SchemaDriftDetector;
             match SchemaDriftDetector::detect_drift(&conn) {

@@ -1,8 +1,10 @@
 pub mod identifier_repair;
+pub mod metadata_backfill;
 pub mod registry;
 pub mod runner;
 
 pub use identifier_repair::repair_quoted_identifiers;
+pub use metadata_backfill::backfill_missing_column_metadata;
 
 use anyhow::Result;
 use rusqlite::Connection;

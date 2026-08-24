@@ -204,6 +204,37 @@ impl CreateTableTranslator {
         false
     }
     
+    /// Decide whether a comma-separated `CREATE TABLE` element is a table-level
+    /// constraint rather than a column definition.
+    ///
+    /// The keyword test has to be exact-token, never a prefix. A bare
+    /// `starts_with("CHECK")` also matches a column literally named `check_in`,
+    /// `checked_out` or `checked_in_at`; such a column was passed straight
+    /// through to SQLite (so it exists in the table) while its
+    /// `__pgsqlite_schema` row was never written. Runtime tolerated the gap by
+    /// falling back to decltype inference, but the startup drift validator
+    /// hard-exits on "columns in SQLite but missing from metadata", so the
+    /// database was wired to fail on its next wake. Three customer databases
+    /// hit exactly this on 2026-08-24; `UNIQUE` (`unique_id`) and `CONSTRAINT`
+    /// (`constraint_name`) carried the same latent trap.
+    ///
+    /// Splitting on `(` as well as whitespace means `CHECK(x > 0)` and
+    /// `PRIMARY KEY(a, b)` tokenize the same way as their spaced forms. Every
+    /// keyword matched here is reserved in PostgreSQL, so a column can only
+    /// carry one of these names by quoting it, and a quoted token never matches.
+    fn is_table_constraint(column_def: &str) -> bool {
+        let mut words = column_def
+            .split(|c: char| c.is_whitespace() || c == '(')
+            .filter(|word| !word.is_empty())
+            .map(|word| word.to_uppercase());
+
+        match words.next().as_deref() {
+            Some("CHECK") | Some("UNIQUE") | Some("CONSTRAINT") => true,
+            Some("PRIMARY") | Some("FOREIGN") => words.next().as_deref() == Some("KEY"),
+            _ => false,
+        }
+    }
+
     fn translate_column_definition(
         column_def: &str,
         table_name: &str,
@@ -212,11 +243,7 @@ impl CreateTableTranslator {
         conn: Option<&Connection>
     ) -> Result<String, PgSqliteError> {
         // Handle constraints (PRIMARY KEY, FOREIGN KEY, etc.)
-        if column_def.to_uppercase().starts_with("PRIMARY KEY") 
-            || column_def.to_uppercase().starts_with("FOREIGN KEY")
-            || column_def.to_uppercase().starts_with("UNIQUE")
-            || column_def.to_uppercase().starts_with("CHECK")
-            || column_def.to_uppercase().starts_with("CONSTRAINT") {
+        if Self::is_table_constraint(column_def) {
             return Ok(column_def.to_string());
         }
         
