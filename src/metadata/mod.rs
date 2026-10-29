@@ -48,11 +48,18 @@ impl TypeMetadata {
         mappings: &HashMap<String, TypeMapping>
     ) -> Result<()> {
         let tx = conn.transaction()?;
-        
+        // Identifiers are always persisted unquoted: SQLite reports the
+        // unquoted name from PRAGMA table_info and the drift check compares the
+        // two as raw strings, so a stored `"created_at"` never matches.
+        let table_name = crate::utils::normalize_identifier(table_name);
+        let table_name = table_name.as_str();
+
         for (full_column, type_mapping) in mappings {
             // Split table.column format
             let parts: Vec<&str> = full_column.split('.').collect();
             if parts.len() == 2 && parts[0] == table_name {
+                let column_name = crate::utils::normalize_identifier(parts[1]);
+                let column_name = column_name.as_str();
                 // Check if type_modifier column exists (for backwards compatibility)
                 let has_type_modifier = tx.query_row(
                     "SELECT COUNT(*) FROM pragma_table_info('__pgsqlite_schema') WHERE name = 'type_modifier'",
@@ -64,13 +71,13 @@ impl TypeMetadata {
                     tx.execute(
                         "INSERT OR REPLACE INTO __pgsqlite_schema (table_name, column_name, pg_type, sqlite_type, type_modifier) 
                          VALUES (?1, ?2, ?3, ?4, ?5)",
-                        rusqlite::params![table_name, parts[1], &type_mapping.pg_type, &type_mapping.sqlite_type, type_mapping.type_modifier],
+                        rusqlite::params![table_name, column_name, &type_mapping.pg_type, &type_mapping.sqlite_type, type_mapping.type_modifier],
                     )?;
                 } else {
                     tx.execute(
                         "INSERT OR REPLACE INTO __pgsqlite_schema (table_name, column_name, pg_type, sqlite_type) 
                          VALUES (?1, ?2, ?3, ?4)",
-                        [table_name, parts[1], &type_mapping.pg_type, &type_mapping.sqlite_type],
+                        [table_name, column_name, &type_mapping.pg_type, &type_mapping.sqlite_type],
                     )?;
                 }
             }

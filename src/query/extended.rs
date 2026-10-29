@@ -5510,8 +5510,13 @@ impl ExtendedQueryHandler {
                     // Store each type mapping and numeric constraints
                     for (full_column, type_mapping) in type_mappings {
                         // Split table.column format
-                        let parts: Vec<&str> = full_column.split('.').collect();
-                        if parts.len() == 2 && parts[0] == table_name {
+                        let raw_parts: Vec<&str> = full_column.split('.').collect();
+                        if raw_parts.len() == 2 && raw_parts[0] == table_name {
+                            // Never persist a quoted identifier: SQLite stores the
+                            // unquoted name and the startup drift check compares the two
+                            // as raw strings, so `"created_at"` would read as drift.
+                            let normalized_column = crate::utils::normalize_identifier(raw_parts[1]);
+                            let parts = [raw_parts[0], normalized_column.as_str()];
                             let insert_query = format!(
                                 "INSERT OR REPLACE INTO __pgsqlite_schema (table_name, column_name, pg_type, sqlite_type) VALUES ('{}', '{}', '{}', '{}')",
                                 table_name, parts[1], type_mapping.pg_type, type_mapping.sqlite_type
@@ -6262,9 +6267,12 @@ fn extract_table_name_from_create(query: &str) -> Option<String> {
         }).unwrap_or(after_create.len());
         
         let table_name = after_create[..table_end].trim();
-        
-        // Remove quotes if present
-        let table_name = table_name.trim_matches('"').trim_matches('\'');
+
+        // Remove quotes if present. Quoted identifiers must be normalized
+        // before they reach the __pgsqlite_* metadata tables, which store
+        // unquoted names.
+        let table_name = crate::utils::normalize_identifier(table_name.trim_matches('\''));
+        let table_name = table_name.as_str();
         
         if !table_name.is_empty() {
             Some(table_name.to_string())

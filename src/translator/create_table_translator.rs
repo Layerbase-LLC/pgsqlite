@@ -2,6 +2,7 @@ use regex::Regex;
 use std::collections::HashMap;
 use crate::metadata::{TypeMapping, EnumMetadata};
 use crate::types::TypeMapper;
+use crate::utils::normalize_identifier;
 use crate::PgSqliteError;
 use rusqlite::Connection;
 use once_cell::sync::Lazy;
@@ -119,9 +120,29 @@ impl CreateTableTranslator {
         let mut column_definitions = Vec::new();
         let mut serial_columns = std::collections::HashSet::new();
         
-        // First pass: collect all column definitions
-        for ch in columns_str.chars() {
+        let mut quote = None;
+        let mut chars = columns_str.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if let Some(delimiter) = quote {
+                current_column.push(ch);
+                if ch == delimiter {
+                    if chars.peek() == Some(&delimiter) {
+                        current_column.push(chars.next().unwrap());
+                    } else {
+                        quote = None;
+                    }
+                }
+                continue;
+            }
             match ch {
+                '\'' | '"' | '`' => {
+                    quote = Some(ch);
+                    current_column.push(ch);
+                }
+                '[' => {
+                    quote = Some(']');
+                    current_column.push(ch);
+                }
                 '(' => {
                     paren_depth += 1;
                     current_column.push(ch);
@@ -179,7 +200,9 @@ impl CreateTableTranslator {
         if parts.len() >= 2 {
             let pg_type = parts[1].to_uppercase();
             if pg_type == "SERIAL" || pg_type == "BIGSERIAL" {
-                return Some(parts[0].to_string());
+                // Normalize so a quoted `"id" SERIAL` still matches the
+                // `PRIMARY KEY (id)` constraint below.
+                return Some(normalize_identifier(parts[0]));
             }
         }
         None
@@ -193,14 +216,45 @@ impl CreateTableTranslator {
             if let Some(start) = column_def.find('(')
                 && let Some(end) = column_def.find(')') {
                     let column_list = &column_def[start + 1..end];
-                    let column_name = column_list.trim();
+                    let column_name = normalize_identifier(column_list);
                     // Check if this references a SERIAL column (case-insensitive)
-                    return serial_columns.iter().any(|serial_col| serial_col.eq_ignore_ascii_case(column_name));
+                    return serial_columns.iter().any(|serial_col| serial_col.eq_ignore_ascii_case(&column_name));
                 }
         }
         false
     }
     
+    /// Decide whether a comma-separated `CREATE TABLE` element is a table-level
+    /// constraint rather than a column definition.
+    ///
+    /// The keyword test has to be exact-token, never a prefix. A bare
+    /// `starts_with("CHECK")` also matches a column literally named `check_in`,
+    /// `checked_out` or `checked_in_at`; such a column was passed straight
+    /// through to SQLite (so it exists in the table) while its
+    /// `__pgsqlite_schema` row was never written. Runtime tolerated the gap by
+    /// falling back to decltype inference, but the startup drift validator
+    /// hard-exits on "columns in SQLite but missing from metadata", so the
+    /// database was wired to fail on its next wake. Three customer databases
+    /// hit exactly this on 2026-08-24; `UNIQUE` (`unique_id`) and `CONSTRAINT`
+    /// (`constraint_name`) carried the same latent trap.
+    ///
+    /// Splitting on `(` as well as whitespace means `CHECK(x > 0)` and
+    /// `PRIMARY KEY(a, b)` tokenize the same way as their spaced forms. Every
+    /// keyword matched here is reserved in PostgreSQL, so a column can only
+    /// carry one of these names by quoting it, and a quoted token never matches.
+    fn is_table_constraint(column_def: &str) -> bool {
+        let mut words = column_def
+            .split(|c: char| c.is_whitespace() || c == '(')
+            .filter(|word| !word.is_empty())
+            .map(|word| word.to_uppercase());
+
+        match words.next().as_deref() {
+            Some("CHECK") | Some("UNIQUE") | Some("CONSTRAINT") => true,
+            Some("PRIMARY") | Some("FOREIGN") => words.next().as_deref() == Some("KEY"),
+            _ => false,
+        }
+    }
+
     fn translate_column_definition(
         column_def: &str,
         table_name: &str,
@@ -209,11 +263,7 @@ impl CreateTableTranslator {
         conn: Option<&Connection>
     ) -> Result<String, PgSqliteError> {
         // Handle constraints (PRIMARY KEY, FOREIGN KEY, etc.)
-        if column_def.to_uppercase().starts_with("PRIMARY KEY") 
-            || column_def.to_uppercase().starts_with("FOREIGN KEY")
-            || column_def.to_uppercase().starts_with("UNIQUE")
-            || column_def.to_uppercase().starts_with("CHECK")
-            || column_def.to_uppercase().starts_with("CONSTRAINT") {
+        if Self::is_table_constraint(column_def) {
             return Ok(column_def.to_string());
         }
         
@@ -227,6 +277,15 @@ impl CreateTableTranslator {
         if parts.len() < 2 {
             return Ok(column_def.to_string());
         }
+
+        // The raw token may be quoted (`"created_at"`), which is what every
+        // identifier-quoting ORM emits. SQLite stores - and PRAGMA table_info
+        // reports - the unquoted name, so anything that ends up persisted in
+        // the __pgsqlite_* metadata tables must use the normalized spelling or
+        // the startup drift check will see the two sides disagree about every
+        // column. The emitted SQL below keeps the original token so the quoting
+        // still protects reserved words.
+        let metadata_column_name = normalize_identifier(column_name);
         
         // Extract the PostgreSQL type (handle multi-word types and parametric types)
         let mut pg_type = parts[1].to_uppercase();
@@ -307,7 +366,7 @@ impl CreateTableTranslator {
             
             // Store array column info for later metadata insertion
             context.array_columns.push((
-                column_name.to_string(),
+                metadata_column_name.clone(),
                 element_type.to_lowercase(),
                 dimensions
             ));
@@ -330,7 +389,7 @@ impl CreateTableTranslator {
                     
                     // Store enum column info for later trigger creation
                     context.enum_columns.push((
-                        column_name.to_string(),
+                        metadata_column_name.clone(),
                         pg_type.to_lowercase().to_string()
                     ));
                     
@@ -356,7 +415,7 @@ impl CreateTableTranslator {
         let type_modifier = Self::extract_type_modifier(&pg_type);
         
         // Store both PostgreSQL and SQLite types with modifier
-        let mapping_key = format!("{table_name}.{column_name}");
+        let mapping_key = format!("{table_name}.{metadata_column_name}");
         type_mapping.insert(mapping_key, TypeMapping {
             pg_type: normalized_pg_type,
             sqlite_type: sqlite_type.clone(),

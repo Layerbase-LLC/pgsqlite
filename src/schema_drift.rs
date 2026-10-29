@@ -2,6 +2,8 @@ use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
+use crate::utils::{normalize_identifier, quote_identifier};
+
 #[derive(Debug, Error)]
 pub enum SchemaDriftError {
     #[error("Schema drift detected: {0}")]
@@ -104,10 +106,23 @@ impl SchemaDriftDetector {
         let mut stmt = conn.prepare(
             "SELECT DISTINCT table_name FROM __pgsqlite_schema ORDER BY table_name"
         )?;
-        
-        let tables = stmt.query_map([], |row| row.get::<_, String>(0))?
+
+        let raw = stmt.query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
-        
+
+        // Metadata written by older builds can carry the surrounding double
+        // quotes from the original DDL (`"themes"`). Normalize before doing
+        // anything with the name, and de-duplicate in case both spellings are
+        // present.
+        let mut tables = Vec::with_capacity(raw.len());
+        let mut seen = HashSet::new();
+        for name in raw {
+            let normalized = normalize_identifier(&name);
+            if seen.insert(normalized.clone()) {
+                tables.push(normalized);
+            }
+        }
+
         Ok(tables)
     }
     
@@ -167,33 +182,37 @@ impl SchemaDriftDetector {
     }
     
     fn get_metadata_columns(conn: &Connection, table_name: &str) -> Result<HashMap<String, ColumnInfo>, rusqlite::Error> {
+        // Match both the normalized name and the legacy quoted spelling that
+        // older builds persisted, so a database poisoned before the write-path
+        // fix still compares correctly instead of reporting every column of
+        // every table as drift (which hard-fails startup).
         let mut stmt = conn.prepare(
-            "SELECT column_name, pg_type, sqlite_type 
-             FROM __pgsqlite_schema 
-             WHERE table_name = ?1"
+            "SELECT column_name, pg_type, sqlite_type
+             FROM __pgsqlite_schema
+             WHERE table_name = ?1 OR table_name = ?2"
         )?;
-        
+
         let mut columns = HashMap::new();
-        let rows = stmt.query_map([table_name], |row| {
+        let rows = stmt.query_map([table_name, &quote_identifier(table_name)], |row| {
             Ok(ColumnInfo {
-                name: row.get(0)?,
+                name: normalize_identifier(&row.get::<_, String>(0)?),
                 pg_type: row.get(1)?,
                 sqlite_type: row.get(2)?,
                 nullable: true, // We don't track this in metadata yet
                 default_value: None, // We don't track this in metadata yet
             })
         })?;
-        
+
         for row in rows {
             let col = row?;
             columns.insert(col.name.clone(), col);
         }
-        
+
         Ok(columns)
     }
-    
+
     fn get_sqlite_columns(conn: &Connection, table_name: &str) -> Result<HashMap<String, ColumnInfo>, rusqlite::Error> {
-        let query = format!("PRAGMA table_info({table_name})");
+        let query = format!("PRAGMA table_info({})", quote_identifier(table_name));
         let mut stmt = conn.prepare(&query)?;
         
         let mut columns = HashMap::new();
@@ -217,12 +236,22 @@ impl SchemaDriftDetector {
     
     fn normalize_sqlite_type(type_str: &str) -> String {
         let upper = type_str.to_uppercase();
-        
+
+        // Strip inline column constraints that pgsqlite bakes into the stored
+        // metadata sqlite_type. SERIAL/BIGSERIAL/IDENTITY columns are stored in
+        // __pgsqlite_schema as e.g. "INTEGER PRIMARY KEY AUTOINCREMENT", but
+        // PRAGMA table_info only ever reports the bare declared type token
+        // ("INTEGER"). Without stripping the constraint suffix the two sides can
+        // never compare equal, producing a false "schema drift" that refuses to
+        // open an otherwise-valid database. The drift check only compares the
+        // column type, not its constraints, so dropping the suffix is safe.
+        let type_only = Self::strip_column_constraints(&upper);
+
         // Remove any size/precision specifications
-        let base_type = if let Some(paren_pos) = upper.find('(') {
-            upper[..paren_pos].trim().to_string()
+        let base_type = if let Some(paren_pos) = type_only.find('(') {
+            type_only[..paren_pos].trim().to_string()
         } else {
-            upper.trim().to_string()
+            type_only.trim().to_string()
         };
         
         // Normalize common variations
@@ -237,6 +266,43 @@ impl SchemaDriftDetector {
             "BYTEA" => "BLOB".to_string(),
             "NUMERIC" | "DECIMAL" => "DECIMAL".to_string(),
             _ => base_type,
+        }
+    }
+
+    /// Drop trailing column constraints from a declared type expression,
+    /// keeping only the leading type token(s) (e.g. "DOUBLE PRECISION",
+    /// "CHARACTER VARYING", "NUMERIC(10, 2)"). The input is expected to be
+    /// already upper-cased. Truncation happens at the first constraint keyword
+    /// on a token boundary, so "INTEGER PRIMARY KEY AUTOINCREMENT" becomes
+    /// "INTEGER" while multi-word base types are preserved.
+    fn strip_column_constraints(upper_type: &str) -> String {
+        const CONSTRAINT_KEYWORDS: &[&str] = &[
+            "PRIMARY",
+            "KEY",
+            "AUTOINCREMENT",
+            "NOT",
+            "NULL",
+            "UNIQUE",
+            "DEFAULT",
+            "CHECK",
+            "REFERENCES",
+            "COLLATE",
+            "CONSTRAINT",
+            "GENERATED",
+        ];
+
+        let mut kept: Vec<&str> = Vec::new();
+        for token in upper_type.split_whitespace() {
+            if CONSTRAINT_KEYWORDS.contains(&token) {
+                break;
+            }
+            kept.push(token);
+        }
+
+        if kept.is_empty() {
+            upper_type.trim().to_string()
+        } else {
+            kept.join(" ")
         }
     }
 }
