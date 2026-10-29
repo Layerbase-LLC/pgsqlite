@@ -120,9 +120,29 @@ impl CreateTableTranslator {
         let mut column_definitions = Vec::new();
         let mut serial_columns = std::collections::HashSet::new();
         
-        // First pass: collect all column definitions
-        for ch in columns_str.chars() {
+        let mut quote = None;
+        let mut chars = columns_str.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if let Some(delimiter) = quote {
+                current_column.push(ch);
+                if ch == delimiter {
+                    if chars.peek() == Some(&delimiter) {
+                        current_column.push(chars.next().unwrap());
+                    } else {
+                        quote = None;
+                    }
+                }
+                continue;
+            }
             match ch {
+                '\'' | '"' | '`' => {
+                    quote = Some(ch);
+                    current_column.push(ch);
+                }
+                '[' => {
+                    quote = Some(']');
+                    current_column.push(ch);
+                }
                 '(' => {
                     paren_depth += 1;
                     current_column.push(ch);
