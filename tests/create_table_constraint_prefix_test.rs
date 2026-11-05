@@ -328,3 +328,19 @@ async fn multiline_lowercase_ddl_records_metadata() {
         ]
     );
 }
+
+/// The executor translates CREATE TABLE, then hands the translated SQL to
+/// `execute_with_session_cached`, which translates it again. Before the fix the
+/// second pass turned `BLOB` into the TEXT default, so every `bytea` column was
+/// created as TEXT while metadata recorded BLOB, and the database refused to
+/// start on its next wake (prod 2026-10-21 and 2026-11-05).
+#[test]
+fn bytea_column_survives_a_second_translation() {
+    let ddl = "CREATE TABLE excel_files (id SERIAL PRIMARY KEY, name TEXT NOT NULL, content BYTEA NOT NULL)";
+    let (first, first_mappings) = CreateTableTranslator::translate(ddl).unwrap();
+    let (second, _) = CreateTableTranslator::translate(&first).unwrap();
+
+    assert_eq!(first_mappings["excel_files.content"].sqlite_type, "BLOB");
+    assert!(first.contains("content BLOB"), "first pass: {first}");
+    assert!(second.contains("content BLOB"), "second pass: {second}");
+}
