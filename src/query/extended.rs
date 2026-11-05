@@ -1362,7 +1362,7 @@ impl ExtendedQueryHandler {
            !query.contains("UNION") &&
            !query.contains("INTERSECT") &&
            !query.contains("EXCEPT") &&
-           (result_formats.is_empty() || result_formats[0] == 0) {
+           !result_formats.contains(&1) {
             
             info!("🚀 Ultra-fast path triggered for query: {}", query);
             // Using fast path for simple SELECT
@@ -1671,9 +1671,8 @@ impl ExtendedQueryHandler {
             let query_type = super::extended_fast_path::QueryType::from_query(effective_query);
             
             // Early check: Skip fast path for SELECT with binary results
-            if matches!(query_type, super::extended_fast_path::QueryType::Select) 
-                && !result_formats.is_empty() 
-                && result_formats[0] == 1 {
+            if matches!(query_type, super::extended_fast_path::QueryType::Select)
+                && result_formats.contains(&1) {
                 // Skipping fast path: binary results
                 // Skip fast path entirely for binary SELECT results
             } else {

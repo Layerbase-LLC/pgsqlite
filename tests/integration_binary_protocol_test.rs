@@ -400,3 +400,100 @@ async fn test_binary_protocol_error_handling() {
     
     server.abort();
 }
+/// Mixed result formats (`[0, 1]`: first column text, second binary), as drivers
+/// like pgx request per column. The fast paths used to look only at the first
+/// format and send every column as text, so a binary column got text bytes.
+#[tokio::test]
+async fn test_mixed_result_formats_encode_per_column() {
+    use bytes::BytesMut;
+    use postgres_protocol::message::{backend, frontend};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let db_path = format!("/tmp/pgsqlite_mixed_{}.db", uuid::Uuid::new_v4().simple());
+    let db = std::sync::Arc::new(pgsqlite::session::DbHandler::new(&db_path).unwrap());
+    db.execute("CREATE TABLE mixed (id INTEGER PRIMARY KEY, n INTEGER, data BYTEA)").await.unwrap();
+    db.execute("INSERT INTO mixed (id, n, data) VALUES (1, 42, X'dead00ff')").await.unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_db = db.clone();
+    let server = tokio::spawn(async move {
+        let (stream, peer) = listener.accept().await.unwrap();
+        let _ = pgsqlite::handle_test_connection_with_pool(stream, peer, server_db).await;
+    });
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut out = BytesMut::new();
+    frontend::startup_message([("user", "test"), ("database", "test")].into_iter(), &mut out).unwrap();
+    stream.write_all(&out).await.unwrap();
+
+    let mut buf = BytesMut::new();
+    async fn next(stream: &mut tokio::net::TcpStream, buf: &mut BytesMut) -> backend::Message {
+        loop {
+            if let Some(message) = backend::Message::parse(buf).unwrap() {
+                return message;
+            }
+            let mut chunk = [0u8; 4096];
+            let n = stream.read(&mut chunk).await.unwrap();
+            assert!(n > 0, "server closed the connection");
+            buf.extend_from_slice(&chunk[..n]);
+        }
+    }
+    while !matches!(next(&mut stream, &mut buf).await, backend::Message::ReadyForQuery(_)) {}
+
+    for (formats, label) in [(vec![0i16, 1, 1], "mixed"), (vec![1i16, 1, 1], "binary")] {
+        let mut out = BytesMut::new();
+        frontend::parse("", "SELECT id, n, data FROM mixed WHERE id = $1", [23u32], &mut out).unwrap();
+        frontend::bind(
+            "",
+            "",
+            [0i16],
+            [1i32],
+            |value: i32, b: &mut BytesMut| {
+                b.extend_from_slice(value.to_string().as_bytes());
+                Ok(postgres_protocol::IsNull::No)
+            },
+            formats,
+            &mut out,
+        )
+        .map_err(|_| "bind")
+        .unwrap();
+        frontend::execute("", 0, &mut out).unwrap();
+        frontend::sync(&mut out);
+        stream.write_all(&out).await.unwrap();
+
+        let mut cells: Option<Vec<Option<Vec<u8>>>> = None;
+        loop {
+            match next(&mut stream, &mut buf).await {
+                backend::Message::DataRow(row) => {
+                    let body = row.buffer();
+                    let mut at = 0;
+                    let mut parsed = Vec::new();
+                    while at < body.len() {
+                        let len = i32::from_be_bytes(body[at..at + 4].try_into().unwrap());
+                        at += 4;
+                        if len < 0 {
+                            parsed.push(None);
+                        } else {
+                            parsed.push(Some(body[at..at + len as usize].to_vec()));
+                            at += len as usize;
+                        }
+                    }
+                    cells = Some(parsed);
+                }
+                backend::Message::ErrorResponse(_) => panic!("{label}: server returned an error"),
+                backend::Message::ReadyForQuery(_) => break,
+                _ => {}
+            }
+        }
+        let cells = cells.unwrap_or_else(|| panic!("{label}: no row"));
+        assert_eq!(cells[1].as_deref(), Some(&42i32.to_be_bytes()[..]), "{label}: n must be binary int4");
+        assert_eq!(cells[2].as_deref(), Some(&[0xde, 0xad, 0x00, 0xff][..]), "{label}: data must be raw bytea");
+        if label == "mixed" {
+            assert_eq!(cells[0].as_deref(), Some(&b"1"[..]), "mixed: id must be text");
+        }
+    }
+
+    server.abort();
+    let _ = std::fs::remove_file(&db_path);
+}
