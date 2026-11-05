@@ -2787,6 +2787,10 @@ impl ExtendedQueryHandler {
         } else {
             // Send as-is (text format)
             for row in response.rows {
+                let mut row = row;
+                if let Some(types) = field_types {
+                    crate::types::bytea::encode_bytea_text_cells(&mut row, types, result_formats);
+                }
                 framed.send(BackendMessage::DataRow(row)).await?;
             }
         }
@@ -2916,6 +2920,7 @@ impl ExtendedQueryHandler {
                         converted_row.push(cell.clone());
                     }
                 }
+                crate::types::bytea::encode_bytea_text_cells(&mut converted_row, types, result_formats);
                 framed.send(BackendMessage::DataRow(converted_row)).await?;
             }
             }
@@ -2942,6 +2947,10 @@ impl ExtendedQueryHandler {
             } else {
                 // Send as-is (text format)
                 for row in response.rows {
+                    let mut row = row;
+                    if let Some(types) = field_types {
+                        crate::types::bytea::encode_bytea_text_cells(&mut row, types, result_formats);
+                    }
                     framed.send(BackendMessage::DataRow(row)).await?;
                 }
             }
@@ -4283,6 +4292,9 @@ impl ExtendedQueryHandler {
                     } else {
                         // Text format
                         match type_oid {
+                            t if t == PgType::Bytea.to_oid() => {
+                                Some(crate::types::bytea::bytea_column_text_cell(bytes))
+                            }
                             t if t == PgType::Bool.to_oid() && matches!(bytes.as_slice(), [0] | [1]) => {
                                 // Binary bool parameters used to be stored as a one-byte BLOB
                                 Some(if bytes[0] == 1 { b"t".to_vec() } else { b"f".to_vec() })
@@ -5312,6 +5324,8 @@ impl ExtendedQueryHandler {
                 &returning_clause,
             ).await;
             
+            let field_types: Vec<i32> = fields.iter().map(|f| f.type_oid).collect();
+            
             framed.send(BackendMessage::RowDescription(fields)).await
                 .map_err(PgSqliteError::Io)?;
             
@@ -5325,6 +5339,8 @@ impl ExtendedQueryHandler {
             ).await?;
             
             for row in converted_rows {
+                let mut row = row;
+                crate::types::bytea::encode_bytea_text_cells(&mut row, &field_types, result_formats);
                 framed.send(BackendMessage::DataRow(row)).await
                     .map_err(PgSqliteError::Io)?;
             }
@@ -5374,6 +5390,8 @@ impl ExtendedQueryHandler {
                     &returning_clause,
                 ).await;
                 
+                let field_types: Vec<i32> = fields.iter().map(|f| f.type_oid).collect();
+                
                 framed.send(BackendMessage::RowDescription(fields)).await
                     .map_err(PgSqliteError::Io)?;
                 
@@ -5387,6 +5405,8 @@ impl ExtendedQueryHandler {
                 ).await?;
                 
                 for row in converted_rows {
+                    let mut row = row;
+                    crate::types::bytea::encode_bytea_text_cells(&mut row, &field_types, result_formats);
                     framed.send(BackendMessage::DataRow(row)).await
                         .map_err(PgSqliteError::Io)?;
                 }
@@ -5430,6 +5450,8 @@ impl ExtendedQueryHandler {
                 &returning_clause,
             ).await;
             
+            let field_types: Vec<i32> = fields.iter().map(|f| f.type_oid).collect();
+            
             framed.send(BackendMessage::RowDescription(fields)).await
                 .map_err(PgSqliteError::Io)?;
             
@@ -5448,6 +5470,8 @@ impl ExtendedQueryHandler {
             
             // Send converted rows
             for row in converted_rows {
+                let mut row = row;
+                crate::types::bytea::encode_bytea_text_cells(&mut row, &field_types, result_formats);
                 framed.send(BackendMessage::DataRow(row)).await
                     .map_err(PgSqliteError::Io)?;
             }

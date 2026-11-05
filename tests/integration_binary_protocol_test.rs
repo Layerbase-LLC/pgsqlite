@@ -453,6 +453,7 @@ async fn test_mixed_result_formats_encode_per_column() {
     let db = std::sync::Arc::new(pgsqlite::session::DbHandler::new(&db_path).unwrap());
     db.execute("CREATE TABLE mixed (id INTEGER PRIMARY KEY, n INTEGER, data BYTEA)").await.unwrap();
     db.execute("INSERT INTO mixed (id, n, data) VALUES (1, 42, X'dead00ff')").await.unwrap();
+    db.execute("INSERT INTO mixed (id, n, data) VALUES (2, 42, X'615c62')").await.unwrap();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -481,14 +482,19 @@ async fn test_mixed_result_formats_encode_per_column() {
     }
     while !matches!(next(&mut stream, &mut buf).await, backend::Message::ReadyForQuery(_)) {}
 
-    for (formats, label) in [(vec![0i16, 1, 1], "mixed"), (vec![1i16, 1, 1], "binary")] {
+    for (id, formats, label) in [
+        (1, vec![0i16, 1, 1], "mixed"),
+        (1, vec![1i16, 1, 1], "binary"),
+        (2, vec![1i16, 1, 1], "binary utf8"),
+        (2, vec![0i16, 0, 0], "text utf8"),
+    ] {
         let mut out = BytesMut::new();
         frontend::parse("", "SELECT id, n, data FROM mixed WHERE id = $1", [23u32], &mut out).unwrap();
         frontend::bind(
             "",
             "",
             [0i16],
-            [1i32],
+            [id],
             |value: i32, b: &mut BytesMut| {
                 b.extend_from_slice(value.to_string().as_bytes());
                 Ok(postgres_protocol::IsNull::No)
@@ -527,8 +533,14 @@ async fn test_mixed_result_formats_encode_per_column() {
             }
         }
         let cells = cells.unwrap_or_else(|| panic!("{label}: no row"));
+        if label == "text utf8" {
+            // Valid UTF-8 with a backslash: only the column type says this is bytea.
+            assert_eq!(cells[2].as_deref(), Some(&b"\\x615c62"[..]), "{label}: data must be hex text");
+            continue;
+        }
         assert_eq!(cells[1].as_deref(), Some(&42i32.to_be_bytes()[..]), "{label}: n must be binary int4");
-        assert_eq!(cells[2].as_deref(), Some(&[0xde, 0xad, 0x00, 0xff][..]), "{label}: data must be raw bytea");
+        let expected: &[u8] = if id == 1 { &[0xde, 0xad, 0x00, 0xff] } else { b"a\\b" };
+        assert_eq!(cells[2].as_deref(), Some(expected), "{label}: data must be raw bytea");
         if label == "mixed" {
             assert_eq!(cells[0].as_deref(), Some(&b"1"[..]), "mixed: id must be text");
         }

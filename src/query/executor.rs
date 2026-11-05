@@ -424,6 +424,7 @@ impl QueryExecutor {
                         })
                         .collect();
                     
+                    let field_types: Vec<i32> = fields.iter().map(|f| f.type_oid).collect();
                     framed.send(BackendMessage::RowDescription(fields)).await
                         .map_err(PgSqliteError::Io)?;
                     
@@ -622,6 +623,8 @@ impl QueryExecutor {
                                 }
                             })
                             .collect();
+                        let mut converted_row = converted_row;
+                        crate::types::bytea::encode_bytea_text_cells(&mut converted_row, &field_types, &[]);
                         
                         framed.send(BackendMessage::DataRow(converted_row)).await
                             .map_err(PgSqliteError::Io)?;
@@ -1472,6 +1475,13 @@ impl QueryExecutor {
             }
         }
         
+        let field_types: Vec<i32> = fields.iter().map(|f| f.type_oid).collect();
+        if field_types.contains(&crate::types::bytea::BYTEA_OID) {
+            for row in &mut converted_rows {
+                crate::types::bytea::encode_bytea_text_cells(row, &field_types, &[]);
+            }
+        }
+
         // Store row count before potential move
         let row_count = converted_rows.len();
         
@@ -1738,6 +1748,7 @@ impl QueryExecutor {
             
             column_types.push(pg_type);
         }
+        let field_types: Vec<i32> = fields.iter().map(|f| f.type_oid).collect();
         
         framed.send(BackendMessage::RowDescription(fields)).await
             .map_err(PgSqliteError::Io)?;
@@ -1811,6 +1822,7 @@ impl QueryExecutor {
                     converted_row.push(None);
                 }
             }
+            crate::types::bytea::encode_bytea_text_cells(&mut converted_row, &field_types, &[]);
             
             framed.send(BackendMessage::DataRow(converted_row)).await
                 .map_err(PgSqliteError::Io)?;
