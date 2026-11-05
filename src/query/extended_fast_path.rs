@@ -535,6 +535,14 @@ impl ExtendedFastPath {
                         Ok(rusqlite::types::Value::Blob(bytes.to_vec()))
                     }
                 }
+                t if t == PgType::Bool.to_oid() => {
+                    // BOOL - one byte, stored as INTEGER 0/1 like the text format
+                    if bytes.len() == 1 {
+                        Ok(rusqlite::types::Value::Integer(i64::from(bytes[0] != 0)))
+                    } else {
+                        Err(PgSqliteError::Protocol(format!("Invalid BOOL binary format, {} bytes", bytes.len())))
+                    }
+                }
                 _ => {
                     // Store as BLOB for unsupported binary types
                     // Unknown binary type, storing as blob
@@ -570,7 +578,7 @@ impl ExtendedFastPath {
         };
         
         // Check if we need to send RowDescription
-        let send_row_desc = {
+        let (send_row_desc, mut field_types) = {
             let portals = session.portals.read().await;
             let portal = portals.get(portal_name).unwrap();
             let statements = session.prepared_statements.read().await;
@@ -599,7 +607,8 @@ impl ExtendedFastPath {
                 debug!("Fast path: Existing field descriptions look suspicious (all TEXT), will override");
             }
             
-            (is_empty || looks_suspicious) && !response.columns.is_empty()
+            let field_types: Vec<i32> = stmt.field_descriptions.iter().map(|fd| fd.type_oid).collect();
+            ((is_empty || looks_suspicious) && !response.columns.is_empty(), field_types)
         };
         
         if send_row_desc {
@@ -709,16 +718,15 @@ impl ExtendedFastPath {
                 }
             }
             
+            field_types = fields.iter().map(|f| f.type_oid).collect();
             framed.send(BackendMessage::RowDescription(fields)).await
                 .map_err(PgSqliteError::Io)?;
         }
         
-        // TODO: Handle result_formats for binary encoding
-        // For now, we only support text format (handled by falling back earlier)
-        let _ = result_formats; // Suppress unused warning
-        
-        // Send data rows
-        for row in response.rows {
+        // Send data rows. Binary result formats fall back to the full path
+        // before this point, so every column here is text.
+        for mut row in response.rows {
+            crate::types::bytea::encode_bytea_text_cells(&mut row, &field_types, result_formats);
             framed.send(BackendMessage::DataRow(row)).await
                 .map_err(PgSqliteError::Io)?;
         }

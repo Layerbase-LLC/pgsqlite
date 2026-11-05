@@ -51,6 +51,24 @@ async fn test_basic_binary_protocol() {
         &"Testing special chars: 🚀"
     ]).await.unwrap();
     
+    // Binary bool parameters must be stored as INTEGER 0/1. They used to be
+    // stored as one-byte BLOBs, which made the read below depend on how a
+    // given read path renders BLOBs (C-731).
+    let stored: Vec<(String, String)> = client
+        .simple_query("SELECT typeof(bool_val), bool_val FROM binary_basic_test ORDER BY id")
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(r) => Some((r.get(0)?.to_string(), r.get(1)?.to_string())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        stored,
+        vec![("integer".to_string(), "t".to_string()), ("integer".to_string(), "f".to_string())]
+    );
+
     // Query data back using binary protocol
     let rows = client.query(
         "SELECT * FROM binary_basic_test ORDER BY id",
@@ -89,6 +107,28 @@ async fn test_basic_binary_protocol() {
     assert_eq!(int_val, -100);
     assert_eq!(text_val, "Testing special chars: 🚀");
     
+    // A bool an older build stored as a one-byte BLOB still reads as a bool.
+    client.simple_query("INSERT INTO binary_basic_test (id, bool_val) VALUES (3, X'01'), (4, X'00')").await.unwrap();
+    let legacy: Vec<String> = client
+        .simple_query("SELECT bool_val FROM binary_basic_test WHERE id >= 3 ORDER BY id")
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(r) => r.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(legacy, vec!["t".to_string(), "f".to_string()]);
+    let legacy: Vec<bool> = client
+        .query("SELECT bool_val FROM binary_basic_test WHERE id >= 3 ORDER BY id", &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert_eq!(legacy, vec![true, false]);
+
     println!("✅ Basic binary protocol test passed");
     server.abort();
 }
@@ -413,6 +453,7 @@ async fn test_mixed_result_formats_encode_per_column() {
     let db = std::sync::Arc::new(pgsqlite::session::DbHandler::new(&db_path).unwrap());
     db.execute("CREATE TABLE mixed (id INTEGER PRIMARY KEY, n INTEGER, data BYTEA)").await.unwrap();
     db.execute("INSERT INTO mixed (id, n, data) VALUES (1, 42, X'dead00ff')").await.unwrap();
+    db.execute("INSERT INTO mixed (id, n, data) VALUES (2, 42, X'615c62')").await.unwrap();
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -441,14 +482,19 @@ async fn test_mixed_result_formats_encode_per_column() {
     }
     while !matches!(next(&mut stream, &mut buf).await, backend::Message::ReadyForQuery(_)) {}
 
-    for (formats, label) in [(vec![0i16, 1, 1], "mixed"), (vec![1i16, 1, 1], "binary")] {
+    for (id, formats, label) in [
+        (1, vec![0i16, 1, 1], "mixed"),
+        (1, vec![1i16, 1, 1], "binary"),
+        (2, vec![1i16, 1, 1], "binary utf8"),
+        (2, vec![0i16, 0, 0], "text utf8"),
+    ] {
         let mut out = BytesMut::new();
         frontend::parse("", "SELECT id, n, data FROM mixed WHERE id = $1", [23u32], &mut out).unwrap();
         frontend::bind(
             "",
             "",
             [0i16],
-            [1i32],
+            [id],
             |value: i32, b: &mut BytesMut| {
                 b.extend_from_slice(value.to_string().as_bytes());
                 Ok(postgres_protocol::IsNull::No)
@@ -487,8 +533,14 @@ async fn test_mixed_result_formats_encode_per_column() {
             }
         }
         let cells = cells.unwrap_or_else(|| panic!("{label}: no row"));
+        if label == "text utf8" {
+            // Valid UTF-8 with a backslash: only the column type says this is bytea.
+            assert_eq!(cells[2].as_deref(), Some(&b"\\x615c62"[..]), "{label}: data must be hex text");
+            continue;
+        }
         assert_eq!(cells[1].as_deref(), Some(&42i32.to_be_bytes()[..]), "{label}: n must be binary int4");
-        assert_eq!(cells[2].as_deref(), Some(&[0xde, 0xad, 0x00, 0xff][..]), "{label}: data must be raw bytea");
+        let expected: &[u8] = if id == 1 { &[0xde, 0xad, 0x00, 0xff] } else { b"a\\b" };
+        assert_eq!(cells[2].as_deref(), Some(expected), "{label}: data must be raw bytea");
         if label == "mixed" {
             assert_eq!(cells[0].as_deref(), Some(&b"1"[..]), "mixed: id must be text");
         }

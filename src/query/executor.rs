@@ -424,6 +424,7 @@ impl QueryExecutor {
                         })
                         .collect();
                     
+                    let field_types: Vec<i32> = fields.iter().map(|f| f.type_oid).collect();
                     framed.send(BackendMessage::RowDescription(fields)).await
                         .map_err(PgSqliteError::Io)?;
                     
@@ -490,7 +491,11 @@ impl QueryExecutor {
                                         // Check for boolean columns
                                         if boolean_columns.contains(col_name) {
                                             // Check if this looks like a boolean value
+                                            // (a one-byte 0x00/0x01 is a binary bool parameter
+                                            // that older builds stored as a BLOB)
                                             match std::str::from_utf8(&data) {
+                                                Ok(_) if data == [0] => Some(b"f".to_vec()),
+                                                Ok(_) if data == [1] => Some(b"t".to_vec()),
                                                 Ok(s) => match s.trim() {
                                                     "0" => Some(b"f".to_vec()),
                                                     "1" => Some(b"t".to_vec()),
@@ -618,6 +623,8 @@ impl QueryExecutor {
                                 }
                             })
                             .collect();
+                        let mut converted_row = converted_row;
+                        crate::types::bytea::encode_bytea_text_cells(&mut converted_row, &field_types, &[]);
                         
                         framed.send(BackendMessage::DataRow(converted_row)).await
                             .map_err(PgSqliteError::Io)?;
@@ -1468,6 +1475,13 @@ impl QueryExecutor {
             }
         }
         
+        let field_types: Vec<i32> = fields.iter().map(|f| f.type_oid).collect();
+        if field_types.contains(&crate::types::bytea::BYTEA_OID) {
+            for row in &mut converted_rows {
+                crate::types::bytea::encode_bytea_text_cells(row, &field_types, &[]);
+            }
+        }
+
         // Store row count before potential move
         let row_count = converted_rows.len();
         
@@ -1734,6 +1748,7 @@ impl QueryExecutor {
             
             column_types.push(pg_type);
         }
+        let field_types: Vec<i32> = fields.iter().map(|f| f.type_oid).collect();
         
         framed.send(BackendMessage::RowDescription(fields)).await
             .map_err(PgSqliteError::Io)?;
@@ -1807,6 +1822,7 @@ impl QueryExecutor {
                     converted_row.push(None);
                 }
             }
+            crate::types::bytea::encode_bytea_text_cells(&mut converted_row, &field_types, &[]);
             
             framed.send(BackendMessage::DataRow(converted_row)).await
                 .map_err(PgSqliteError::Io)?;
@@ -2456,9 +2472,10 @@ impl QueryExecutor {
                     } else if type_oid == PgType::Bool.to_oid() {
                         // Convert boolean values from integer 0/1 to PostgreSQL f/t format
                         // Optimized: work directly with bytes to avoid string conversion overhead
-                        if data.len() == 1 && data[0] == b'0' {
+                        // 0x00/0x01: a binary bool parameter older builds stored as a BLOB
+                        if data.len() == 1 && (data[0] == b'0' || data[0] == 0) {
                             Some(b"f".to_vec())
-                        } else if data.len() == 1 && data[0] == b'1' {
+                        } else if data.len() == 1 && (data[0] == b'1' || data[0] == 1) {
                             Some(b"t".to_vec())
                         } else {
                             Some(data) // Keep original data if not 0/1
