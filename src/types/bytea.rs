@@ -10,12 +10,14 @@
 //! Rows are built from the SQLite storage class alone, without the column's
 //! PostgreSQL type, so a BLOB that is valid UTF-8 is sent unchanged, exactly as
 //! before: a text column whose value SQLite returns as a BLOB must stay
-//! readable. Only BLOBs that are not valid UTF-8 (real binary data, which no
-//! text column can hold) switch to hex.
+//! readable. BLOBs that are not valid UTF-8 (real binary data, which no text
+//! column can hold) switch to hex, and so does any BLOB that itself starts with
+//! `\x`: in a result cell a leading `\x` then always means hex, so the
+//! binary-format decoder can never mistake raw bytes for encoded ones.
 
 /// Render a SQLite BLOB for a text-format result cell.
 pub fn blob_to_text_format(blob: &[u8]) -> Vec<u8> {
-    if std::str::from_utf8(blob).is_ok() {
+    if !blob.starts_with(b"\\x") && std::str::from_utf8(blob).is_ok() {
         return blob.to_vec();
     }
     let mut out = Vec::with_capacity(2 + blob.len() * 2);
@@ -55,6 +57,14 @@ mod tests {
     #[test]
     fn non_utf8_blob_is_hex() {
         assert_eq!(blob_to_text_format(&[0x50, 0x4b, 0x03, 0x04, 0xff]), b"\\x504b0304ff".to_vec());
+    }
+
+    #[test]
+    fn blob_that_looks_like_hex_text_round_trips() {
+        let raw = b"\\x4142".to_vec();
+        let cell = blob_to_text_format(&raw);
+        assert_eq!(cell, b"\\x5c7834313432".to_vec());
+        assert_eq!(text_format_to_raw(&cell), raw);
     }
 
     #[test]
