@@ -356,7 +356,14 @@ impl TypeMapper {
         mapper.pg_to_sqlite.insert("numeric".to_string(), "DECIMAL".to_string());
         mapper.pg_to_sqlite.insert("decimal".to_string(), "DECIMAL".to_string());
         mapper.pg_to_sqlite.insert("bytea".to_string(), "BLOB".to_string());
-        
+        // Every SQLite type this map emits must map to itself. CREATE TABLE is
+        // translated twice on the executor path (once to capture metadata, once
+        // more inside execute_with_session_cached), so a missing identity entry
+        // let `bytea` -> BLOB fall through to the TEXT default on the second
+        // pass: the table was created with TEXT while __pgsqlite_schema
+        // recorded BLOB, and the startup drift check refused the database.
+        mapper.pg_to_sqlite.insert("blob".to_string(), "BLOB".to_string());
+
         // Additional mappings from PRD
         mapper.pg_to_sqlite.insert("serial".to_string(), "INTEGER".to_string());
         mapper.pg_to_sqlite.insert("bigserial".to_string(), "INTEGER".to_string());

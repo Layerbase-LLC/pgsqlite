@@ -324,3 +324,54 @@ fn test_parametric_types_normalization() -> rusqlite::Result<()> {
     
     Ok(())
 }
+/// Builds up to v0.0.22-layerbase-9 created every `bytea` column as TEXT while
+/// recording BYTEA/BLOB in metadata. Those databases must start again.
+#[test]
+fn test_legacy_bytea_column_created_as_text_is_not_drift() -> rusqlite::Result<()> {
+    let mut conn = Connection::open_in_memory()?;
+    TypeMetadata::init(&conn)?;
+
+    conn.execute(
+        "CREATE TABLE excel_files (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, content TEXT NOT NULL)",
+        [],
+    )?;
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT INTO __pgsqlite_schema (table_name, column_name, pg_type, sqlite_type)
+         VALUES
+         ('excel_files', 'id', 'SERIAL', 'INTEGER PRIMARY KEY AUTOINCREMENT'),
+         ('excel_files', 'name', 'TEXT', 'TEXT'),
+         ('excel_files', 'content', 'BYTEA', 'BLOB')",
+        [],
+    )?;
+    tx.commit()?;
+
+    let drift = SchemaDriftDetector::detect_drift(&conn).unwrap();
+    assert!(drift.is_empty(), "unexpected drift: {}", drift.format_report());
+
+    Ok(())
+}
+
+/// The legacy allowance is exactly BYTEA/BLOB vs TEXT; any other mismatch on a
+/// bytea column is still real drift.
+#[test]
+fn test_bytea_column_with_other_live_type_is_still_drift() -> rusqlite::Result<()> {
+    let mut conn = Connection::open_in_memory()?;
+    TypeMetadata::init(&conn)?;
+
+    conn.execute("CREATE TABLE files (id INTEGER PRIMARY KEY, content INTEGER)", [])?;
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT INTO __pgsqlite_schema (table_name, column_name, pg_type, sqlite_type)
+         VALUES
+         ('files', 'id', 'INTEGER', 'INTEGER'),
+         ('files', 'content', 'BYTEA', 'BLOB')",
+        [],
+    )?;
+    tx.commit()?;
+
+    let drift = SchemaDriftDetector::detect_drift(&conn).unwrap();
+    assert!(!drift.is_empty());
+
+    Ok(())
+}
