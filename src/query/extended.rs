@@ -3123,6 +3123,14 @@ impl ExtendedQueryHandler {
                                     format!("X'{}'", hex::encode(bytes))
                                 }
                             }
+                            t if t == PgType::Bool.to_oid() => {
+                                // bool - one byte, stored as INTEGER 0/1 like the text format
+                                if bytes.len() == 1 {
+                                    if bytes[0] != 0 { "1".to_string() } else { "0".to_string() }
+                                } else {
+                                    format!("X'{}'", hex::encode(bytes))
+                                }
+                            }
                             0 => {
                                 // No type specified - try to infer from byte pattern
                                 if bytes.len() == 1 && (bytes[0] == 0 || bytes[0] == 1) {
@@ -4286,6 +4294,10 @@ impl ExtendedQueryHandler {
                         match type_oid {
                             t if t == PgType::Bytea.to_oid() => {
                                 Some(crate::types::bytea::bytea_column_text_cell(bytes))
+                            }
+                            t if t == PgType::Bool.to_oid() && matches!(bytes.as_slice(), [0] | [1]) => {
+                                // Binary bool parameters used to be stored as a one-byte BLOB
+                                Some(if bytes[0] == 1 { b"t".to_vec() } else { b"f".to_vec() })
                             }
                             t if t == PgType::Bool.to_oid() => {
                                 // bool - convert SQLite's 0/1 to PostgreSQL's f/t format

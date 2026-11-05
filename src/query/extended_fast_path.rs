@@ -535,6 +535,14 @@ impl ExtendedFastPath {
                         Ok(rusqlite::types::Value::Blob(bytes.to_vec()))
                     }
                 }
+                t if t == PgType::Bool.to_oid() => {
+                    // BOOL - one byte, stored as INTEGER 0/1 like the text format
+                    if bytes.len() == 1 {
+                        Ok(rusqlite::types::Value::Integer(i64::from(bytes[0] != 0)))
+                    } else {
+                        Err(PgSqliteError::Protocol(format!("Invalid BOOL binary format, {} bytes", bytes.len())))
+                    }
+                }
                 _ => {
                     // Store as BLOB for unsupported binary types
                     // Unknown binary type, storing as blob
