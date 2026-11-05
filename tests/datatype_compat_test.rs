@@ -483,6 +483,12 @@ async fn test_bytea_text_format_is_hex() {
         .execute("INSERT INTO bytea_text (id, data) VALUES (2, '\\x0102'::bytea)", &[])
         .await
         .unwrap();
+    // Valid UTF-8 with a backslash: only the column type says this is bytea.
+    let utf8_blob = b"a\\b".to_vec();
+    client
+        .execute("INSERT INTO bytea_text (id, data) VALUES ($1, $2)", &[&3i32, &utf8_blob])
+        .await
+        .unwrap();
 
     let messages = client.simple_query("SELECT data FROM bytea_text ORDER BY id").await.unwrap();
     let texts: Vec<String> = messages
@@ -492,11 +498,11 @@ async fn test_bytea_text_format_is_hex() {
             _ => None,
         })
         .collect();
-    assert_eq!(texts, vec!["\\xdead00ff5c78".to_string(), "\\x0102".to_string()]);
+    assert_eq!(texts, vec!["\\xdead00ff5c78".to_string(), "\\x0102".to_string(), "\\x615c62".to_string()]);
 
     let rows = client.query("SELECT data FROM bytea_text ORDER BY id", &[]).await.unwrap();
     let raw: Vec<Vec<u8>> = rows.iter().map(|r| r.get(0)).collect();
-    assert_eq!(raw, vec![blob, vec![0x01, 0x02]]);
+    assert_eq!(raw, vec![blob, vec![0x01, 0x02], utf8_blob]);
 
     server.abort();
 }
