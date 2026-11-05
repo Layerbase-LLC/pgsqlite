@@ -53,10 +53,10 @@ impl ExtendedFastPath {
         // Execute based on query type
         match query_type {
             QueryType::Select => {
-                // Fast check for binary result formats - optimize for common case
-                // Most queries use text format (empty or [0])
-                // Check first element as most queries have uniform format
-                if !result_formats.is_empty() && result_formats[0] == 1 {
+                // The fast path sends every column in text format, so any
+                // binary column (including mixed formats such as [0, 1]) must
+                // take the normal path, which encodes per column.
+                if result_formats.contains(&1) {
                     // Fall back to normal path for binary results
                     // TODO: Implement proper binary encoding for result formats
                     return Ok(false);
