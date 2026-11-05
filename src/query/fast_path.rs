@@ -456,7 +456,7 @@ pub fn query_fast_path(
                                 }
                             },
                             ValueRef::Text(s) => values.push(Some(s.to_vec())),
-                            ValueRef::Blob(b) => values.push(Some(b.to_vec())),
+                            ValueRef::Blob(b) => values.push(Some(crate::types::bytea::blob_to_text_format(b))),
                         }
                     }
                     Ok(values)
@@ -704,7 +704,7 @@ fn execute_fast_select_with_params(
                     }
                 },
                 ValueRef::Text(s) => values.push(Some(s.to_vec())),
-                ValueRef::Blob(b) => values.push(Some(b.to_vec())),
+                ValueRef::Blob(b) => values.push(Some(crate::types::bytea::blob_to_text_format(b))),
             }
         }
         Ok(values)
@@ -822,7 +822,7 @@ fn execute_fast_select(
                     }
                 },
                 ValueRef::Text(s) => values.push(Some(s.to_vec())),
-                ValueRef::Blob(b) => values.push(Some(b.to_vec())),
+                ValueRef::Blob(b) => values.push(Some(crate::types::bytea::blob_to_text_format(b))),
             }
         }
         Ok(values)

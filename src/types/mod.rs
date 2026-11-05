@@ -1,5 +1,6 @@
 // Module for type mappings and conversions
 pub mod type_mapper;
+pub mod bytea;
 pub mod uuid;
 pub mod sqlite_type_info;
 pub mod schema_type_mapper;

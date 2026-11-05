@@ -373,7 +373,7 @@ impl ReadOnlyOptimizer {
                         values.push(Some(s.to_vec()));
                     }
                     rusqlite::types::ValueRef::Blob(b) => {
-                        values.push(Some(b.to_vec()));
+                        values.push(Some(crate::types::bytea::blob_to_text_format(b)));
                     }
                 }
             }
