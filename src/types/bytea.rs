@@ -14,6 +14,10 @@
 //! column can hold) switch to hex, and so does any BLOB that itself starts with
 //! `\x`: in a result cell a leading `\x` then always means hex, so the
 //! binary-format decoder can never mistake raw bytes for encoded ones.
+//!
+//! The send paths then know each column's type: `encode_bytea_text_cells`
+//! hex-encodes any text-format cell of a bytea column that is not already in
+//! hex form, so a bytea value that happens to be valid UTF-8 is correct too.
 
 /// Render a SQLite BLOB for a text-format result cell.
 pub fn blob_to_text_format(blob: &[u8]) -> Vec<u8> {
@@ -38,9 +42,88 @@ pub fn text_format_to_raw(cell: &[u8]) -> Vec<u8> {
     cell.to_vec()
 }
 
+/// PostgreSQL type OID of bytea.
+pub const BYTEA_OID: i32 = 17;
+
+fn is_hex_text_form(cell: &[u8]) -> bool {
+    cell.strip_prefix(b"\\x")
+        .is_some_and(|digits| digits.len() % 2 == 0 && digits.iter().all(u8::is_ascii_hexdigit))
+}
+
+/// Text-format cell for a column whose PostgreSQL type is bytea. Row builders
+/// cannot see the column type, so they pass a valid UTF-8 BLOB through
+/// unchanged; once the type is known, a cell not already in `\x` hex form is
+/// raw bytes (a UTF-8 BLOB, or text stored in the bytea column) and is
+/// hex-encoded, as PostgreSQL would send it.
+pub fn bytea_column_text_cell(cell: &[u8]) -> Vec<u8> {
+    if is_hex_text_form(cell) {
+        return cell.to_vec();
+    }
+    let mut out = Vec::with_capacity(2 + cell.len() * 2);
+    out.extend_from_slice(b"\\x");
+    out.extend_from_slice(hex::encode(cell).as_bytes());
+    out
+}
+
+/// Apply `bytea_column_text_cell` to every text-format bytea cell of a row.
+/// `result_formats` follows the Bind rules: empty means all text, one entry
+/// applies to every column, otherwise one entry per column.
+pub fn encode_bytea_text_cells(row: &mut [Option<Vec<u8>>], field_types: &[i32], result_formats: &[i16]) {
+    for (i, cell) in row.iter_mut().enumerate() {
+        if field_types.get(i) != Some(&BYTEA_OID) {
+            continue;
+        }
+        let format = match result_formats.len() {
+            0 => 0,
+            1 => result_formats[0],
+            _ => result_formats.get(i).copied().unwrap_or(0),
+        };
+        if format != 0 {
+            continue;
+        }
+        if let Some(bytes) = cell
+            && !is_hex_text_form(bytes)
+        {
+            *bytes = bytea_column_text_cell(bytes);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bytea_column_hex_encodes_raw_utf8() {
+        assert_eq!(bytea_column_text_cell(b"a\\b"), b"\\x615c62".to_vec());
+        assert_eq!(bytea_column_text_cell("caf\u{e9}".as_bytes()), b"\\x636166c3a9".to_vec());
+        assert_eq!(bytea_column_text_cell(b""), b"\\x".to_vec());
+    }
+
+    #[test]
+    fn bytea_column_keeps_hex_form() {
+        assert_eq!(bytea_column_text_cell(b"\\xdead00ff"), b"\\xdead00ff".to_vec());
+        assert_eq!(bytea_column_text_cell(b"\\xZZ"), b"\\x5c785a5a".to_vec());
+        assert_eq!(bytea_column_text_cell(b"\\x123"), b"\\x5c78313233".to_vec());
+    }
+
+    #[test]
+    fn only_text_format_bytea_cells_change() {
+        let row = || vec![Some(b"a\\b".to_vec()), Some(b"a\\b".to_vec()), None];
+        let types = [25, BYTEA_OID, BYTEA_OID];
+
+        let mut text = row();
+        encode_bytea_text_cells(&mut text, &types, &[]);
+        assert_eq!(text, vec![Some(b"a\\b".to_vec()), Some(b"\\x615c62".to_vec()), None]);
+
+        let mut binary = row();
+        encode_bytea_text_cells(&mut binary, &types, &[1]);
+        assert_eq!(binary, row());
+
+        let mut mixed = row();
+        encode_bytea_text_cells(&mut mixed, &types, &[0, 1, 0]);
+        assert_eq!(mixed, row());
+    }
 
     #[test]
     fn blob_renders_as_hex_text() {
