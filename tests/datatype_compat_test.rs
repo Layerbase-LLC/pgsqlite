@@ -465,3 +465,38 @@ async fn test_special_values() {
     
     server.abort();
 }
+/// Text-format results (simple query protocol, and the default for most
+/// drivers) must carry bytea as `\x` + hex, like PostgreSQL. Raw bytes made
+/// clients decode garbage (prod, 2026-11-05). Binary format stays raw.
+#[tokio::test]
+async fn test_bytea_text_format_is_hex() {
+    let server = setup_test_server().await;
+    let client = &server.client;
+
+    client.execute("CREATE TABLE bytea_text (id INTEGER PRIMARY KEY, data BYTEA)", &[]).await.unwrap();
+    let blob = vec![0xdeu8, 0xad, 0x00, 0xff, b'\\', b'x'];
+    client
+        .execute("INSERT INTO bytea_text (id, data) VALUES ($1, $2)", &[&1i32, &blob])
+        .await
+        .unwrap();
+    client
+        .execute("INSERT INTO bytea_text (id, data) VALUES (2, '\\x0102'::bytea)", &[])
+        .await
+        .unwrap();
+
+    let messages = client.simple_query("SELECT data FROM bytea_text ORDER BY id").await.unwrap();
+    let texts: Vec<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, vec!["\\xdead00ff5c78".to_string(), "\\x0102".to_string()]);
+
+    let rows = client.query("SELECT data FROM bytea_text ORDER BY id", &[]).await.unwrap();
+    let raw: Vec<Vec<u8>> = rows.iter().map(|r| r.get(0)).collect();
+    assert_eq!(raw, vec![blob, vec![0x01, 0x02]]);
+
+    server.abort();
+}

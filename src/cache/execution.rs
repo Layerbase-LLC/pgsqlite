@@ -257,7 +257,7 @@ impl TypeConverterTable {
                 },
                 // 4: Blob converter
                 |value| match value {
-                    rusqlite::types::Value::Blob(b) => Ok(b.clone()),
+                    rusqlite::types::Value::Blob(b) => Ok(crate::types::bytea::blob_to_text_format(b)),
                     rusqlite::types::Value::Text(s) => Ok(s.as_bytes().to_vec()),
                     rusqlite::types::Value::Null => Ok(Vec::new()),
                     _ => Ok(Vec::new()),

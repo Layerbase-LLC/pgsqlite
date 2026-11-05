@@ -565,7 +565,7 @@ impl DbHandler {
                                 Some(rusqlite::types::Value::Text(s)) => Some(s.into_bytes()),
                                 Some(rusqlite::types::Value::Integer(i)) => Some(i.to_string().into_bytes()),
                                 Some(rusqlite::types::Value::Real(f)) => Some(f.to_string().into_bytes()),
-                                Some(rusqlite::types::Value::Blob(b)) => Some(b),
+                                Some(rusqlite::types::Value::Blob(b)) => Some(crate::types::bytea::blob_to_text_format(&b)),
                                 Some(rusqlite::types::Value::Null) | None => None,
                             });
                         }
@@ -813,7 +813,7 @@ impl DbHandler {
                                             Some(rusqlite::types::Value::Text(s)) => Some(s.into_bytes()),
                                             Some(rusqlite::types::Value::Integer(i)) => Some(i.to_string().into_bytes()),
                                             Some(rusqlite::types::Value::Real(f)) => Some(f.to_string().into_bytes()),
-                                            Some(rusqlite::types::Value::Blob(b)) => Some(b),
+                                            Some(rusqlite::types::Value::Blob(b)) => Some(crate::types::bytea::blob_to_text_format(&b)),
                                             Some(rusqlite::types::Value::Null) | None => None,
                                         });
                                     }
@@ -931,7 +931,7 @@ impl DbHandler {
                         Some(rusqlite::types::Value::Text(s)) => Some(s.into_bytes()),
                         Some(rusqlite::types::Value::Integer(i)) => Some(i.to_string().into_bytes()),
                         Some(rusqlite::types::Value::Real(f)) => Some(f.to_string().into_bytes()),
-                        Some(rusqlite::types::Value::Blob(b)) => Some(b),
+                        Some(rusqlite::types::Value::Blob(b)) => Some(crate::types::bytea::blob_to_text_format(&b)),
                         Some(rusqlite::types::Value::Null) | None => None,
                     });
                 }
@@ -1278,7 +1278,7 @@ impl DbHandler {
                                 Some(rusqlite::types::Value::Text(s)) => Some(s.into_bytes()),
                                 Some(rusqlite::types::Value::Integer(i)) => Some(i.to_string().into_bytes()),
                                 Some(rusqlite::types::Value::Real(f)) => Some(f.to_string().into_bytes()),
-                                Some(rusqlite::types::Value::Blob(b)) => Some(b),
+                                Some(rusqlite::types::Value::Blob(b)) => Some(crate::types::bytea::blob_to_text_format(&b)),
                                 Some(rusqlite::types::Value::Null) | None => None,
                             });
                         }
@@ -1489,7 +1489,7 @@ impl DbHandler {
                                                     Some(rusqlite::types::Value::Text(s)) => Some(s.into_bytes()),
                                                     Some(rusqlite::types::Value::Integer(i)) => Some(i.to_string().into_bytes()),
                                                     Some(rusqlite::types::Value::Real(f)) => Some(f.to_string().into_bytes()),
-                                                    Some(rusqlite::types::Value::Blob(b)) => Some(b),
+                                                    Some(rusqlite::types::Value::Blob(b)) => Some(crate::types::bytea::blob_to_text_format(&b)),
                                                     Some(rusqlite::types::Value::Null) | None => None,
                                                 });
                                             }
@@ -1758,7 +1758,7 @@ impl DbHandler {
                         Some(rusqlite::types::Value::Text(s)) => Some(s.into_bytes()),
                         Some(rusqlite::types::Value::Integer(i)) => Some(i.to_string().into_bytes()),
                         Some(rusqlite::types::Value::Real(f)) => Some(f.to_string().into_bytes()),
-                        Some(rusqlite::types::Value::Blob(b)) => Some(b),
+                        Some(rusqlite::types::Value::Blob(b)) => Some(crate::types::bytea::blob_to_text_format(&b)),
                         Some(rusqlite::types::Value::Null) | None => None,
                     });
                 }
@@ -2458,7 +2458,7 @@ impl DbHandler {
                                 }
                                 rusqlite::types::ValueRef::Real(f) => Some(f.to_string().into_bytes()),
                                 rusqlite::types::ValueRef::Text(s) => Some(s.to_vec()),
-                                rusqlite::types::ValueRef::Blob(b) => Some(b.to_vec()),
+                                rusqlite::types::ValueRef::Blob(b) => Some(crate::types::bytea::blob_to_text_format(b)),
                             };
                             row_data.push(value);
                         }
@@ -2551,7 +2551,7 @@ impl DbHandler {
                                     }
                                     rusqlite::types::ValueRef::Real(f) => Some(f.to_string().into_bytes()),
                                     rusqlite::types::ValueRef::Text(s) => Some(s.to_vec()),
-                                    rusqlite::types::ValueRef::Blob(b) => Some(b.to_vec()),
+                                    rusqlite::types::ValueRef::Blob(b) => Some(crate::types::bytea::blob_to_text_format(b)),
                                 };
                                 row_data.push(value);
                             }

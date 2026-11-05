@@ -158,7 +158,9 @@ impl SchemaDriftDetector {
             let metadata_type_normalized = Self::normalize_sqlite_type(&metadata_col.sqlite_type);
             let actual_type_normalized = Self::normalize_sqlite_type(&sqlite_col.sqlite_type);
             
-            if metadata_type_normalized != actual_type_normalized {
+            if metadata_type_normalized != actual_type_normalized
+                && !Self::is_legacy_bytea_text_column(metadata_col, &actual_type_normalized)
+            {
                 type_mismatches.push(TypeMismatch {
                     column_name: name.clone(),
                     metadata_pg_type: metadata_col.pg_type.clone(),
@@ -181,6 +183,17 @@ impl SchemaDriftDetector {
         }
     }
     
+    /// Builds up to v0.0.22-layerbase-9 translated CREATE TABLE twice, so every
+    /// `bytea` column was created as TEXT while its metadata recorded
+    /// BYTEA/BLOB. Those tables are valid: TEXT affinity never converts a
+    /// stored BLOB value, and reads are typed by the BYTEA pg_type. Accept
+    /// exactly that pair so the databases they live in can start again.
+    fn is_legacy_bytea_text_column(metadata_col: &ColumnInfo, actual_type_normalized: &str) -> bool {
+        metadata_col.pg_type.eq_ignore_ascii_case("BYTEA")
+            && Self::normalize_sqlite_type(&metadata_col.sqlite_type) == "BLOB"
+            && actual_type_normalized == "TEXT"
+    }
+
     fn get_metadata_columns(conn: &Connection, table_name: &str) -> Result<HashMap<String, ColumnInfo>, rusqlite::Error> {
         // Match both the normalized name and the legacy quoted spelling that
         // older builds persisted, so a database poisoned before the write-path

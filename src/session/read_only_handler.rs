@@ -83,7 +83,7 @@ impl ReadOnlyDbHandler {
                     rusqlite::types::Value::Integer(i) => Some(i.to_string().into_bytes()),
                     rusqlite::types::Value::Real(f) => Some(f.to_string().into_bytes()),
                     rusqlite::types::Value::Text(s) => Some(s.into_bytes()),
-                    rusqlite::types::Value::Blob(b) => Some(b),
+                    rusqlite::types::Value::Blob(b) => Some(crate::types::bytea::blob_to_text_format(&b)),
                 };
                 values.push(value);
             }
@@ -130,7 +130,7 @@ impl ReadOnlyDbHandler {
                     rusqlite::types::Value::Integer(i) => Some(i.to_string().into_bytes()),
                     rusqlite::types::Value::Real(f) => Some(f.to_string().into_bytes()),
                     rusqlite::types::Value::Text(s) => Some(s.into_bytes()),
-                    rusqlite::types::Value::Blob(b) => Some(b),
+                    rusqlite::types::Value::Blob(b) => Some(crate::types::bytea::blob_to_text_format(&b)),
                 };
                 values.push(value);
             }
