@@ -2689,7 +2689,7 @@ impl ExtendedQueryHandler {
                 rusqlite::types::Value::Integer(i) => Some(i.to_string().into_bytes()),
                 rusqlite::types::Value::Real(f) => Some(f.to_string().into_bytes()),
                 rusqlite::types::Value::Text(s) => Some(s.clone().into_bytes()),
-                rusqlite::types::Value::Blob(b) => Some(b.clone()),
+                rusqlite::types::Value::Blob(b) => Some(crate::types::bytea::blob_to_text_format(b)),
             }
         }).collect();
         
@@ -4249,10 +4249,9 @@ impl ExtendedQueryHandler {
                                 result.extend_from_slice(bytes);
                                 Some(result)
                             }
-                            // Bytea - already binary
+                            // Bytea - rows carry it in hex text form; binary format is raw bytes
                             t if t == PgType::Bytea.to_oid() => {
-                                // bytea - raw bytes
-                                Some(bytes.clone())
+                                Some(crate::types::bytea::text_format_to_raw(bytes))
                             }
                             // Small integers
                             t if t == PgType::Int2.to_oid() => {

@@ -141,7 +141,7 @@ impl StatementCacheOptimizer {
                             row_data.push(Some(val.to_vec()));
                         },
                         rusqlite::types::ValueRef::Blob(val) => {
-                            row_data.push(Some(val.to_vec()));
+                            row_data.push(Some(crate::types::bytea::blob_to_text_format(val)));
                         },
                     }
                 }
@@ -186,7 +186,7 @@ impl StatementCacheOptimizer {
                         row_data.push(Some(val.to_vec()));
                     },
                     rusqlite::types::ValueRef::Blob(val) => {
-                        row_data.push(Some(val.to_vec()));
+                        row_data.push(Some(crate::types::bytea::blob_to_text_format(val)));
                     },
                 }
             }
