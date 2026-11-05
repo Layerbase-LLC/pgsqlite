@@ -490,7 +490,11 @@ impl QueryExecutor {
                                         // Check for boolean columns
                                         if boolean_columns.contains(col_name) {
                                             // Check if this looks like a boolean value
+                                            // (a one-byte 0x00/0x01 is a binary bool parameter
+                                            // that older builds stored as a BLOB)
                                             match std::str::from_utf8(&data) {
+                                                Ok(_) if data == [0] => Some(b"f".to_vec()),
+                                                Ok(_) if data == [1] => Some(b"t".to_vec()),
                                                 Ok(s) => match s.trim() {
                                                     "0" => Some(b"f".to_vec()),
                                                     "1" => Some(b"t".to_vec()),
@@ -2456,9 +2460,10 @@ impl QueryExecutor {
                     } else if type_oid == PgType::Bool.to_oid() {
                         // Convert boolean values from integer 0/1 to PostgreSQL f/t format
                         // Optimized: work directly with bytes to avoid string conversion overhead
-                        if data.len() == 1 && data[0] == b'0' {
+                        // 0x00/0x01: a binary bool parameter older builds stored as a BLOB
+                        if data.len() == 1 && (data[0] == b'0' || data[0] == 0) {
                             Some(b"f".to_vec())
-                        } else if data.len() == 1 && data[0] == b'1' {
+                        } else if data.len() == 1 && (data[0] == b'1' || data[0] == 1) {
                             Some(b"t".to_vec())
                         } else {
                             Some(data) // Keep original data if not 0/1

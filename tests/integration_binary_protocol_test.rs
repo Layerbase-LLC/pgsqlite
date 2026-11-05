@@ -51,6 +51,24 @@ async fn test_basic_binary_protocol() {
         &"Testing special chars: 🚀"
     ]).await.unwrap();
     
+    // Binary bool parameters must be stored as INTEGER 0/1. They used to be
+    // stored as one-byte BLOBs, which made the read below depend on how a
+    // given read path renders BLOBs (C-731).
+    let stored: Vec<(String, String)> = client
+        .simple_query("SELECT typeof(bool_val), bool_val FROM binary_basic_test ORDER BY id")
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(r) => Some((r.get(0)?.to_string(), r.get(1)?.to_string())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        stored,
+        vec![("integer".to_string(), "t".to_string()), ("integer".to_string(), "f".to_string())]
+    );
+
     // Query data back using binary protocol
     let rows = client.query(
         "SELECT * FROM binary_basic_test ORDER BY id",
@@ -89,6 +107,28 @@ async fn test_basic_binary_protocol() {
     assert_eq!(int_val, -100);
     assert_eq!(text_val, "Testing special chars: 🚀");
     
+    // A bool an older build stored as a one-byte BLOB still reads as a bool.
+    client.simple_query("INSERT INTO binary_basic_test (id, bool_val) VALUES (3, X'01'), (4, X'00')").await.unwrap();
+    let legacy: Vec<String> = client
+        .simple_query("SELECT bool_val FROM binary_basic_test WHERE id >= 3 ORDER BY id")
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(r) => r.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(legacy, vec!["t".to_string(), "f".to_string()]);
+    let legacy: Vec<bool> = client
+        .query("SELECT bool_val FROM binary_basic_test WHERE id >= 3 ORDER BY id", &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert_eq!(legacy, vec![true, false]);
+
     println!("✅ Basic binary protocol test passed");
     server.abort();
 }
