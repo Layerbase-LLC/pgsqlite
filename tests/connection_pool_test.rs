@@ -240,3 +240,50 @@ async fn test_db_handler_schema_cache() -> Result<(), Box<dyn std::error::Error>
     
     Ok(())
 }
+fn count_rows(result: &pgsqlite::session::DbResponse) -> i64 {
+    let count_bytes = result.rows[0][0].as_ref().unwrap();
+    std::str::from_utf8(count_bytes).unwrap().parse().unwrap()
+}
+
+/// A COMMIT must not wait on other sessions: with one session holding a read
+/// transaction and another idle, every COMMIT used to force a TRUNCATE
+/// checkpoint through the idle session, which waited out the busy timeout for
+/// the reader. Idle sessions must still see the committed row.
+#[tokio::test]
+async fn test_write_does_not_wait_on_other_sessions() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = tempfile::tempdir()?;
+    let db_path = temp_dir.path().join("test_write_latency.db");
+    let db_handler = Arc::new(DbHandler::new(db_path.to_str().unwrap())?);
+
+    let writer = Uuid::new_v4();
+    let reader = Uuid::new_v4();
+    let idle = Uuid::new_v4();
+    for session_id in [writer, reader, idle] {
+        db_handler.create_session_connection(session_id).await?;
+    }
+
+    db_handler.execute_with_session("CREATE TABLE test_latency (id INTEGER PRIMARY KEY, value INTEGER)", &writer).await?;
+    db_handler.execute_with_session("INSERT INTO test_latency (value) VALUES (1)", &writer).await?;
+    assert_eq!(count_rows(&db_handler.query_with_session("SELECT COUNT(*) FROM test_latency", &idle).await?), 1);
+
+    db_handler.begin_with_session(&reader).await?;
+    assert_eq!(count_rows(&db_handler.query_with_session("SELECT COUNT(*) FROM test_latency", &reader).await?), 1);
+
+    let started = std::time::Instant::now();
+    db_handler.begin_with_session(&writer).await?;
+    db_handler.execute_with_session("INSERT INTO test_latency (value) VALUES (2)", &writer).await?;
+    db_handler.commit_with_session(&writer).await?;
+    let elapsed = started.elapsed();
+    assert!(elapsed < std::time::Duration::from_secs(1), "COMMIT took {elapsed:?} with another session reading");
+
+    assert_eq!(count_rows(&db_handler.query_with_session("SELECT COUNT(*) FROM test_latency", &idle).await?), 2);
+    assert_eq!(count_rows(&db_handler.query_with_session("SELECT COUNT(*) FROM test_latency", &reader).await?), 1);
+    db_handler.commit_with_session(&reader).await?;
+    assert_eq!(count_rows(&db_handler.query_with_session("SELECT COUNT(*) FROM test_latency", &reader).await?), 2);
+
+    for session_id in [writer, reader, idle] {
+        db_handler.remove_session_connection(&session_id);
+    }
+
+    Ok(())
+}
