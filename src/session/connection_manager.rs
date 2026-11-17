@@ -161,65 +161,6 @@ impl ConnectionManager {
         self.connections.read().contains_key(session_id)
     }
     
-    /// Force WAL checkpoint on all connections except the specified one
-    /// This ensures all connections see committed data from other connections
-    pub fn refresh_all_other_connections(&self, excluding_session: &Uuid) -> Result<(), PgSqliteError> {
-        // Only do this in WAL mode
-        if self.config.pragma_journal_mode != "WAL" {
-            return Ok(());
-        }
-        
-        let connections = self.connections.read();
-        let mut refresh_count = 0;
-        let mut error_count = 0;
-        
-        for (session_id, conn_arc) in connections.iter() {
-            // Skip the session that just committed
-            if session_id == excluding_session {
-                continue;
-            }
-            
-            // Lock the individual connection
-            let conn = conn_arc.lock();
-            
-            // Force this connection to end its current read transaction and start a new one
-            // This is necessary in WAL mode for the connection to see committed changes
-            // from other connections
-            
-            // First, try to end any active read transaction by executing a dummy query
-            // and ensuring it's fully consumed
-            let _ = conn.query_row("SELECT 1", [], |_row| Ok(()));
-            
-            // Then force a new transaction context by doing a no-op write transaction
-            // This ensures the connection releases its old snapshot and gets a new one
-            match conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;") {
-                Ok(_) => {
-                    // Now do the WAL checkpoint with TRUNCATE mode to force WAL to be fully applied
-                    // and reset the WAL file, ensuring all connections see the latest data
-                    match conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(())) {
-                        Ok(_) => {
-                            refresh_count += 1;
-                            debug!("Refreshed WAL and transaction context for session {}", session_id);
-                        }
-                        Err(e) => {
-                            error_count += 1;
-                            debug!("Failed to checkpoint WAL for session {}: {}", session_id, e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error_count += 1;
-                    debug!("Failed to refresh transaction context for session {}: {}", session_id, e);
-                }
-            }
-        }
-        
-        debug!("WAL refresh completed: {} success, {} errors, excluding session {}", 
-               refresh_count, error_count, excluding_session);
-        
-        Ok(())
-    }
-    
     /// Execute a function with a mutable connection for a session
     pub fn execute_with_session_mut<F, R>(
         &self, 
