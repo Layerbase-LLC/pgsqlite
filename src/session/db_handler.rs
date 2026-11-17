@@ -590,33 +590,8 @@ impl DbHandler {
                 }
             };
             
-            // After a successful DML operation, check if we need to trigger WAL refresh
-            // This is needed for autocommit mode where no explicit COMMIT is sent
-            if query_type != QueryType::Select && result.rows_affected > 0 {
-                // Check if we're in autocommit mode
-                if conn.is_autocommit() {
-                    debug!("DML operation completed in autocommit mode, need to trigger WAL refresh for session {}", session_id);
-                    // Note: We can't trigger refresh from within the connection closure
-                    // We'll need to return a flag to the caller
-                }
-            }
-            
             Ok(result)
         })?;
-        
-        // After the closure completes, check if we need WAL refresh
-        let query_type = QueryTypeDetector::detect_query_type(query);
-        if query_type != QueryType::Select && result.rows_affected > 0 {
-            // Check if we're in autocommit mode
-            let is_autocommit = self.connection_manager.execute_with_session(session_id, |conn| {
-                Ok(conn.is_autocommit())
-            })?;
-            
-            if is_autocommit {
-                debug!("DML operation completed in autocommit mode, triggering WAL refresh for session {}", session_id);
-                self.connection_manager.refresh_all_other_connections(session_id)?;
-            }
-        }
         
         Ok(result)
     }
@@ -2212,10 +2187,6 @@ impl DbHandler {
             Ok(())
         })?;
         
-        // Force all other connections to refresh their WAL view (WAL mode only)
-        // This ensures committed data is visible to all other sessions
-        self.connection_manager.refresh_all_other_connections(session_id)?;
-        
         Ok(())
     }
     
@@ -2583,22 +2554,6 @@ impl DbHandler {
             
             Ok(Some(response?))
         })?;
-        
-        // After a successful DML operation, check if we need to trigger WAL refresh
-        // This is needed for autocommit mode where no explicit COMMIT is sent
-        if let Some(ref response) = result
-            && query_type != QueryType::Select && response.rows_affected > 0 {
-                // Check if we're in autocommit mode
-                let is_autocommit = self.connection_manager.execute_with_session(session_id, |conn| {
-                    let autocommit = conn.is_autocommit();
-                    Ok(autocommit)
-                })?;
-                
-                if is_autocommit {
-                    debug!("DML operation completed in autocommit mode, triggering WAL refresh for session {}", session_id);
-                    self.connection_manager.refresh_all_other_connections(session_id)?;
-                }
-            }
         
         Ok(result)
     }
